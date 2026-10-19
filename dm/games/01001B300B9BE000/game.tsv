@@ -50,3 +50,10 @@ tex_flush_upload	on
 tex_dirty_upload	on
 
 # build trigger note (no functional change)
+
+# ---- Conditional rendering ----
+# D3 imports nvnCommandBufferSetRenderEnableConditional / ReportCounter / ResetCounter (found in main's import names), so it
+# wraps work in conditional blocks like Tears of the Kingdom does. With this off, a timestamp report's counter field carries the
+# time instead of 0 (the real GPU puts the time in the second field), so the game's "counter == counter" comparisons never hold and
+# every conditional clear / draw runs anyway: wasted GPU work (frame drops with many monsters) and clears the game wanted skipped.
+render_cond	on

@@ -3230,22 +3230,43 @@ static void warm_start(void) {
     dispatch_async(q, ^{ warm_worker(paths); });
 }
 static int g_rt_ovr;   // Stencil override for runtime extrapolation: 0 no override; 1 pass only on the unit / effect / extrapolation-hole bits (0xD0), no stencil write; 3 depth test as usual, write the effect bit 0x40 where it passes
+// ---------- Stencil cull criteria (nvnCommandBufferSetStencilCullCriteria) ----------
+// D3 sets this on nearly every frame and the host used to answer it from the red-stub list, so nothing was ever culled: occluded
+// geometry was drawn anyway (models showing through walls / terrain) and the GPU paid for every occluded fragment, which is what
+// made a crowd of monsters drop frames. Metal has no cull predicate, so the criterion is expressed as a stencil test with the
+// INVERTED comparison: a fragment is culled when the criterion holds, so it may be drawn only where the criterion fails. The stencil
+// buffer is read only, never written. Env DM_NVN_CULLCRIT=1 (default 0) so a wrong polarity can be reverted without a rebuild.
+static int g_cc_func, g_cc_ref, g_cc_mask, g_cc_on;
+static int cc_enabled(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_CULLCRIT"); v = e && !strcmp(e, "1"); if (v) MLOG("DM_NVN_CULLCRIT=1：模板遮挡剔除生效（判据取反做模板测试）"); } return v; }
+static int cc_inv(int f) { static const int m[9] = { 0, 8, 7, 6, 5, 4, 3, 2, 1 }; return f >= 1 && f <= 8 ? m[f] : 8; }   // host func enum is 1-based (8 = always): never<->always, less<->gequal, equal<->notequal, lequal<->greater
+static void cc_reset(void) { if (g_cc_on) { g_cc_on = 0; g_dss_dirty = 1; } }
 static id<MTLDepthStencilState> dss_get(int has_depth, int has_stencil) {
-    struct { ds_st ds; uint32_t vm[2], wm[2]; int hd, hs, ovr; } k;
+    struct { ds_st ds; uint32_t vm[2], wm[2]; int hd, hs, ovr; int cc[3]; } k;
     memset(&k, 0, sizeof k); k.ds = S.ds; memcpy(k.vm, S.st_vmask, 8); memcpy(k.wm, S.st_wmask, 8); k.hd = has_depth; k.hs = has_stencil; k.ovr = has_stencil ? g_rt_ovr : 0;
+    if (cc_enabled() && g_cc_on && has_stencil) { k.cc[0] = g_cc_func; k.cc[1] = g_cc_ref; k.cc[2] = g_cc_mask; }
     if (!g_dss.klen) g_dss.klen = sizeof k;
     id<MTLDepthStencilState> s = hm_get_id(&g_dss, &k);
     if (s) return s;
     MTLDepthStencilDescriptor *d = [MTLDepthStencilDescriptor new];
     if (has_depth && S.ds.dt) { d.depthCompareFunction = (MTLCompareFunction)(S.ds.df - 1); d.depthWriteEnabled = S.ds.dw; }
-    if (has_stencil && S.ds.st) {
+    if (has_stencil && (S.ds.st || k.cc[0])) {
         MTLStencilDescriptor *f = [MTLStencilDescriptor new], *b = [MTLStencilDescriptor new];
+        if (k.cc[0]) {   // criterion: no stencil writes, keep on every outcome, read with the inverted comparison
+            int cf = (int)cc_inv(g_cc_func);
+            for (int i = 0; i < 2; i++) {
+                MTLStencilDescriptor *x = i ? b : f;
+                x.stencilCompareFunction = (MTLCompareFunction)cf; x.stencilFailureOperation = MTLStencilOperationKeep;
+                x.depthFailureOperation = MTLStencilOperationKeep; x.depthStencilPassOperation = MTLStencilOperationKeep;
+                x.readMask = (uint32_t)g_cc_mask; x.writeMask = 0;
+            }
+        } else {
         f.stencilCompareFunction = (MTLCompareFunction)(S.ds.sf_f - 1); f.stencilFailureOperation = (MTLStencilOperation)(S.ds.fail_f - 1);
         f.depthFailureOperation = (MTLStencilOperation)(S.ds.zfail_f - 1); f.depthStencilPassOperation = (MTLStencilOperation)(S.ds.zpass_f - 1);
         f.readMask = S.st_vmask[0]; f.writeMask = S.st_wmask[0];
         b.stencilCompareFunction = (MTLCompareFunction)(S.ds.sf_b - 1); b.stencilFailureOperation = (MTLStencilOperation)(S.ds.fail_b - 1);
         b.depthFailureOperation = (MTLStencilOperation)(S.ds.zfail_b - 1); b.depthStencilPassOperation = (MTLStencilOperation)(S.ds.zpass_b - 1);
         b.readMask = S.st_vmask[1]; b.writeMask = S.st_wmask[1];
+        }
         d.frontFaceStencil = f; d.backFaceStencil = b;
     }
     if (has_stencil && k.ovr) {
@@ -3747,6 +3768,7 @@ static int state_op(uint32_t op, const void *a) {
             for (int f = 0; f < 2; f++) if (b->face & (1 << f)) { if (b->which == 0) S.st_vmask[f] = b->value_mask; else if (b->which == 1) S.st_wmask[f] = b->mask; else S.st_ref[f] = b->ref; }
             break;
         }
+        case OP_CULLCRIT: { const p_cullcrit *b = a; g_cc_func = b->func; g_cc_ref = b->ref; g_cc_mask = b->mask; g_cc_on = 1; g_dss_dirty = 1; break; }
         case OP_POLY_OFFSET: S.po = *(const p_poly_offset *)a; break;
         case OP_VIEWPORTS: { const p_viewports *b = a; for (int i = 0; i < b->n; i++) memcpy(S.vp[b->first + i], b->v[i], 16); S.has_vp = 1; break; }
         case OP_DEPTH_RANGE: { const p_depth_range *b = a; S.dr[0] = b->n; S.dr[1] = b->f; break; }
@@ -6379,7 +6401,8 @@ void mtl_exec(const uint8_t *p) {
                     if (g_hoist_n) { MLOG("【红】纯清除通道前提：提交结束时还有 %d 条已前提的操作没走到，清空（不应发生）", g_hoist_n); g_hoist_n = 0; }
                 }
                 return;   // An end-of-pass triggered outside a list (present / CPU readback etc.) must not scan expired command memory: a null start point means store everything
-            case OP_BEGIN: break;
+            case OP_BEGIN: cc_reset(); break;
+            case OP_CULLCRIT: { const p_cullcrit *b = a; g_cc_func = b->func; g_cc_ref = b->ref; g_cc_mask = b->mask; g_cc_on = 1; g_dss_dirty = 1; break; }
             case OP_JUMP: { const uint8_t *t; memcpy(&t, a, 8); p = t; continue; }
             case OP_CALL: { uint64_t t; memcpy(&t, a, 8);
                 if (g_ret_n < 16) g_ret[g_ret_n] = p + h.size; g_ret_n++;   // Return stack for lookahead: after a sub-list ends, continue looking at the caller

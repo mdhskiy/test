@@ -834,6 +834,12 @@ NVN(nvnCommandBufferBindSeparateSampler, void, NVNcommandBuffer *c, NVNshaderSta
 NVN(nvnCommandBufferSetStencilValueMask, void, NVNcommandBuffer *c, NVNface f, int m) { *REC(c, OP_STENCIL, p_stencil) = (p_stencil){f, m, 0, 0, 0}; }
 NVN(nvnCommandBufferSetStencilMask, void, NVNcommandBuffer *c, NVNface f, int m) { *REC(c, OP_STENCIL, p_stencil) = (p_stencil){f, 0, m, 0, 1}; }
 NVN(nvnCommandBufferSetStencilRef, void, NVNcommandBuffer *c, NVNface f, int v) { *REC(c, OP_STENCIL, p_stencil) = (p_stencil){f, 0, 0, v, 2}; }
+typedef struct { uint32_t func, ref, mask; } NVNstencilCullCriteria;   // 12 bytes, passed in three registers (D3: func=3 equal, ref=1)
+// Stencil cull criteria: the game marks occluders in the stencil buffer and then asks for the occluded fragments to be culled.
+// Metal has no cull predicate, so nvn_mtl.m turns it into a stencil test with the inverted comparison (drawn where the criterion does not hold). Env DM_NVN_CULLCRIT=1 gates it.
+NVN_NOPROTO(nvnCommandBufferSetStencilCullCriteria, void, NVNcommandBuffer *c, NVNstencilCullCriteria crit) {
+    *REC(c, OP_CULLCRIT, p_cullcrit) = (p_cullcrit){ (int32_t)crit.func, (int32_t)crit.ref, (int32_t)crit.mask };
+}
 NVN(nvnCommandBufferSetPolygonOffsetClamp, void, NVNcommandBuffer *c, float fa, float un, float cl) {
     *REC(c, OP_POLY_OFFSET, p_poly_offset) = (p_poly_offset){fa, un, cl};
 }
