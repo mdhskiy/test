@@ -40,7 +40,14 @@ printf '{"info":{"author":"xcode","version":1}}\n' > Gen/Assets.xcassets/Content
 # 通用字体随壳走（不是游戏内容）：standard = macOS 的 Arial Unicode，nintendo_ext = 按钮图标（fontTools 生成）
 # The generic fonts travel with the shell (not game content): standard = macOS's Arial Unicode, nintendo_ext = button icons (needs fontTools)
 mkdir -p Gen/dm/font
-cp "${STD_FONT:-/System/Library/Fonts/Supplemental/Arial Unicode.ttf}" Gen/dm/font/standard.ttf || die "copy standard font (STD_FONT=a TTF)"
+STD=${STD_FONT:-/System/Library/Fonts/Supplemental/Arial Unicode.ttf}
+if [ ! -f "$STD" ]; then   # macOS 15 may not ship Arial Unicode: fall back to another system TTF
+  for c in "/System/Library/Fonts/Supplemental/Arial.ttf" "/System/Library/Fonts/Supplemental/Verdana.ttf" "/System/Library/Fonts/Supplemental/Times New Roman.ttf"; do
+    [ -f "$c" ] && { t "标准字体回退到 $c"; STD=$c; break; }
+  done
+fi
+[ -f "$STD" ] || die "找不到标准字体：用 STD_FONT=<一个 TTF> 指定"
+cp "$STD" Gen/dm/font/standard.ttf || die "copy standard font"
 ${FONT_PY:-python3} "$DM/tools/make_ext_font.py" Gen/dm/font/nintendo_ext.ttf > /dev/null || die "make_ext_font.py (pip install fonttools, or FONT_PY=python with fontTools)"
 
 t "xcodegen"
