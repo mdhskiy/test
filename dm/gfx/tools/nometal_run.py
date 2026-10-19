@@ -25,7 +25,7 @@ def run(args, *a, **k):
     enc = (lambda s: s) if text else (lambda s: s.encode())
     if isinstance(args, (list, tuple)) and args:
         c = [str(x) for x in args]
-        if c[0] == 'xcrun' and 'metal' in c and '--version' in c: return _done(args, enc('none\n'))
+        if c[0] == 'xcrun' and ('--version' in c or any(a.startswith('--show') for a in c)): return _done(args, enc('none\n'))   # metal / metallib --version, --show-sdk-version …: version queries answer "none" (only the cache identity is built from them)
         if c[0] == 'xcrun' and 'metal' in c and '-c' in c and '-o' in c:   # source = the first argument after metal that is neither an option nor the value of -o (the iOS command also carries a version option after -c)
             o = c.index('-o'); src = [x for i, x in enumerate(c[c.index('metal') + 1:], c.index('metal') + 1) if not x.startswith('-') and i != o + 1]
             if len(src) != 1: raise RuntimeError('nometal_run：认不出源码参数 %r' % c)

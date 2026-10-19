@@ -261,15 +261,21 @@ def rmtree(p):
     elif p.exists(): shutil.rmtree(p)
 
 
+def dotnet_bin():   # on this machine a bare "dotnet" resolves to the runtime-only install (C:\Program Files\dotnet, no SDK); the SDK lives in ~/.dotnet and must be called by absolute path
+    c = Path.home() / '.dotnet' / ('dotnet.exe' if os.name == 'nt' else 'dotnet')
+    return str(c) if c.exists() else 'dotnet'
+
+
 def build_nx_extract(repo, work, logs, env):
     """Build nx_extract into <work>/tools/nx_extract/. It is built in a temporary folder and copied over: with an apostrophe in the output path (e.g. "Bowser's Fury") MSBuild's conditions break,
     LibHac.dll and the executable are not copied, and the build still reports success"""
     nx = work / 'tools/nx_extract/nx_extract'
     with tempfile.TemporaryDirectory(prefix='nx_extract_') as t:
-        run(['dotnet', 'build', repo / 'dm/tools/nx_extract', '-c', 'Release', '-o', t, '-v', 'quiet', '-nologo'], logs / 'nx_extract_build.log', env=env)
-        if not (Path(t) / 'nx_extract').exists(): raise BuildError(f'nx_extract 编译后没有可执行文件（见 {logs / "nx_extract_build.log"}）| nx_extract built without an executable (see {logs / "nx_extract_build.log"})')
+        run([dotnet_bin(), 'build', repo / 'dm/tools/nx_extract', '-c', 'Release', '-o', t, '-v', 'quiet', '-nologo'], logs / 'nx_extract_build.log', env=env)
+        exe = 'nx_extract.exe' if os.name == 'nt' else 'nx_extract'   # Windows: the apphost carries .exe
+        if not (Path(t) / exe).exists(): raise BuildError(f'nx_extract 编译后没有可执行文件（见 {logs / "nx_extract_build.log"}）| nx_extract built without an executable (see {logs / "nx_extract_build.log"}）')
         rmtree(nx.parent); shutil.copytree(t, nx.parent)
-    return nx
+    return nx.with_suffix('.exe') if os.name == 'nt' else nx   # Windows: return the .exe path so run([nx, ...]) can execute it
 
 
 def swap_in(tmp, dst):   # swap the new output in as a whole (the old one is untouched on failure)
@@ -383,7 +389,7 @@ def survey(nsp_dir, app, fam, keys, repo, py, env):
         except OSError: return None
     PROG.stage('survey: RomFS manifest', poll=listed)
     say(f'解出代码模块与 RomFS 清单（不写游戏文件）| extracting the code modules and a RomFS manifest (no game files written) → {ex}')
-    run([nx, keys, fam['base'], upd or '-', tmp, '--manifest'] + (['--allow-damaged'] if ALLOW_DAMAGED else []), logs / 'extract.log')
+    run([nx, keys, fam['base'], upd or '-', tmp, '--manifest'] + (['--allow-damaged'] if ALLOW_DAMAGED else []), logs / 'extract.log', env=env)
     swap_in(tmp, ex)
     PROG.stage('survey: code modules', step='reading')
     xlog = (logs / 'extract.log').read_text(errors='replace')
@@ -940,13 +946,15 @@ def main(args=None):
     if not keys.is_file(): raise BuildError(f'没有这个文件 | no such file: {keys}')
     env = dict(os.environ, PATH=os.pathsep.join(TOOL_PATHS + [os.environ.get('PATH', '/usr/bin:/bin:/usr/sbin:/sbin')]))
     env.setdefault('USER', getpass.getuser())   # xcodegen fails without USER (Couldn't find current username)
+    dn = Path.home() / '.dotnet'                # the nx_extract apphost finds the .NET 10 runtime through DOTNET_ROOT
+    if dn.exists(): env.setdefault('DOTNET_ROOT', str(dn))
     py = sys.executable
     app, fam = scan_nsps(nsp_dir)
     g, provisional = gamemod.by_title(app), False
     if g is None:   # no game profile: survey, then (unless --survey-only) a provisional profile outside the repository and a best-effort IPA
         missing = [m for m in ('lz4.block', 'capstone') if not _importable(m)]
         if missing: raise BuildError(f'当前 Python（{sys.executable}）缺模块 | the current Python is missing modules: {", ".join(missing)}')
-        if not shutil.which('dotnet', path=env['PATH']): raise BuildError('找不到 dotnet（.NET SDK 10）| dotnet not found (.NET SDK 10)')
+        if not shutil.which(dotnet_bin(), path=env['PATH']): raise BuildError('找不到 dotnet（.NET SDK 10）| dotnet not found (.NET SDK 10)')
         pdir = Path(os.path.expanduser(args.profile_out or PROFILE_OUT)).resolve() if (args.profile_out or PROFILE_OUT) else nsp_dir / f'{app:016X}_build' / 'profile'
         if (pdir / f'{app:016X}' / 'game.tsv').exists() and not (args.survey_only or SURVEY_ONLY):
             say(f'没有 {app:016X} 的游戏档案，沿用上次生成的临时档案（删掉它会重新粗查）| no game profile for {app:016X}: reusing the provisional profile from the last run (delete it to survey again)')

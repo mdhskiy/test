@@ -1,0 +1,39 @@
+# 出「壳」：macOS runner 上构建不含任何游戏内容的 iOS 安装包（源码里没有游戏数据 / NSP / prod.keys）。
+# 产物（artifact）：DmIOS-shell-build-input.zip + shell_manifest.txt + shell_info.txt + build.log。
+# 用法：Actions → Build shell → Run workflow（可选：填 GAME，缺省用仓库里的 D3 档案）。
+# 拿到产物后，在 Windows 上：python scripts/d3rm_pack.py --shell <下载的 zip> --game <游戏目录> --out <输出.ipa>
+name: Build shell
+on:
+  workflow_dispatch:
+    inputs:
+      game:
+        description: "game profile (base game title ID)"
+        required: false
+        default: "01001B300B9BE000"
+  push:
+    paths: ['dm/**', 'scripts/d3rm_pack.py', '.github/workflows/build-shell.yml']
+
+jobs:
+  shell:
+    runs-on: macos-15
+    env:
+      GAME: ${{ github.event.inputs.game || '01001B300B9BE000' }}
+      DM_ROOT: ${{ github.workspace }}/dm-work
+    steps:
+      - uses: actions/checkout@v4
+      - name: tools (xcodegen, fontTools)
+        run: |
+          brew install xcodegen
+          python3 -m pip install --quiet fonttools
+      - name: build the shell
+        run: bash dm/ios/tools/shell_build.sh
+      - name: artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: DmIOS-shell
+          path: |
+            dm-work/build/shell/DmIOS-shell-build-input.zip
+            dm-work/build/shell/shell_manifest.txt
+            dm-work/build/shell/shell_info.txt
+            dm-work/build/shell/build.log
+          retention-days: 30

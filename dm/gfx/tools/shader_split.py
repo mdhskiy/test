@@ -93,6 +93,36 @@ def bahs_shaders(d, label):
         out.append((f'{label}#BAHS@{a:#x}', st, ctl, code))
     return out
 
+def cpk_shaders(path, label, out):
+    """D3's CRIWARE CPK archives (d3cpk.py): the shaders are the Shaders/*.shd entries, DEADBEEF containers holding
+    NVN control sections with their code areas (a vertex / pixel pair per file; the update's Patch CPKs add and replace
+    shaders). Full scan for the control-section magic, not the container's own tables: each control section is followed
+    directly by its code area (control +0x20 = control length, +0x704 = code length), as in a GLSLC output.
+    A compute section comes from the thread group at +0x748 (a compute code area may have no header)."""
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from d3cpk import CPK
+    a = CPK(path)
+    try:
+        for n in sorted(n for n in a.by_name if n.lower().replace('/', '\\').startswith('shaders\\')):
+            d = a.read(n, plain_only=True)   # the .shd bytes lie in plain chunks; encrypted ones are skipped and any hole would raise
+            c = d.find(CTL_MAGIC)
+            while c >= 0:
+                nctl, ncode = struct.unpack_from('<I', d, c + 0x20)[0], struct.unpack_from('<I', d, c + 0x704)[0]
+                if (nctl in (0x880, 0x88c) or 0x760 <= nctl < 0x880) and ncode >= 0x40 and c + nctl + ncode <= len(d):
+                    ctl, code = d[c:c + nctl], d[c + nctl:c + nctl + ncode]
+                    where = f'{label}/{n.replace(chr(92), "/")}#CPK@{c:#x}'
+                    if code[:4] == GFX_MAGIC:
+                        st = SPH_STAGE.get((struct.unpack_from('<I', code, 0x30)[0] >> 10) & 0xf)
+                    elif code[:4] == CS_MAGIC or code[:4] not in (CS_MAGIC, GFX_MAGIC) and any(struct.unpack_from('<3I', ctl, 0x748)):
+                        st = 'cs'   # a compute code area may have no header; the stage then comes from the thread group
+                    else:
+                        st = None
+                    if st and not check(where, st, ctl, code):
+                        out.append((where, st, ctl, code))
+                c = d.find(CTL_MAGIC, c + 4)
+    finally:
+        a.close()
+
 def mshd_shaders(d, label):
     out, c = [], d.find(CTL_MAGIC)
     while c >= 0:
@@ -363,6 +393,9 @@ def scan_file(args):
     path, rel = args[:2]
     with open(path, 'rb') as f: head = f.read(16)
     found = []; trees = {}
+    if path.endswith('.cpk'):   # D3's CPK archives: the shaders are Shaders\*.shd entries (d3cpk.py)
+        cpk_shaders(path, '/' + rel, found)
+        return rel, uniq_keys(found), var_pairs(found), trees
     if head[:8] == IDRK:
         idrk_shaders(path, '/' + rel, found)
         return rel, uniq_keys(found), var_pairs(found), trees
@@ -410,7 +443,7 @@ def main():
     files, results, common = [], [], None
     for i, (romfs, mainnso) in enumerate(zip(romfs_v, main_v)):
         tag = os.path.basename(os.path.dirname(os.path.abspath(romfs))) if i else ''
-        files += sorted((os.path.join(dp, f), (tag + '/' if tag else '') + os.path.relpath(os.path.join(dp, f), romfs)) for dp, _, fs in os.walk(romfs) for f in fs)
+        files += sorted((os.path.join(dp, f), (tag + '/' if tag else '') + os.path.relpath(os.path.join(dp, f), romfs).replace(os.sep, '/')) for dp, _, fs in os.walk(romfs) for f in fs)
         img = nso_image(mainnso)
         if not i:
             import unityfs
@@ -472,7 +505,7 @@ def main():
         with open(os.path.join(pkg, name), 'wb') as f: f.write(b''.join(rr))
     with open(mapout, 'w') as f:
         kinds = ' / '.join(k for k, hit in (('BNSH / BAHS', any('#BNSH@' in r[4] or '#BAHS@' in r[4] for r in rows)), ('Unity Shader', any('#var' in r[4] and '#BNSH@' not in r[4] and '#MSHD#' not in r[4] for r in rows)),
-                                            ('MSHD', any('#MSHD#' in r[4] for r in rows)), ('GLSLC', any('#GLSLC@' in r[4] for r in rows))) if hit)
+                                            ('MSHD', any('#MSHD#' in r[4] for r in rows)), ('CPK', any('#CPK@' in r[4] for r in rows)), ('GLSLC', any('#GLSLC@' in r[4] for r in rows))) if hit)
         f.write(f'# kind: evidence  {NOTE}（RomFS + main 里的 {kinds}）→ 控制段 + 代码区键（dm/gfx/tools/shader_split.py）\n')
         f.write('# 第 5 列记每个键首次出现的位置；本作没有 PC 版配对\n')
         f.write('package\tindex\tstage\tdm_ctl_sha16\tsource\n')

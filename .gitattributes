@@ -1,0 +1,3 @@
+# shell scripts and python must keep LF: the macOS CI checkout would otherwise get CRLF ("bad interpreter")
+*.sh text eol=lf
+*.py text eol=lf
