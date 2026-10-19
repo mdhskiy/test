@@ -48,3 +48,5 @@ shader_note	Diablo III: Eternal Collection shaders (provisional profile)
 # them as GPU-written and binds a freshly zeroed MTL texture (all textures black, only font text visible).
 tex_flush_upload	on
 tex_dirty_upload	on
+
+# build trigger note (no functional change)
