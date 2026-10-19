@@ -52,13 +52,18 @@ jobs:
           echo "STD_FONT=/System/Library/Fonts/Supplemental/Arial Unicode.ttf" >> "$GITHUB_ENV"
       - name: build the shell
         id: build
-        run: bash dm/ios/tools/shell_build.sh
+        run: |
+          mkdir -p "$DM_ROOT/build/shell"
+          bash dm/ios/tools/shell_build.sh 2>&1 | tee "$DM_ROOT/build/shell/script.log"
       - name: failure diagnostics (into the run summary)
         if: failure()
         run: |
           {
+            echo '## script.log tail'; echo '```'
+            tail -40 dm-work/build/shell/script.log 2>/dev/null || echo '(none)'
+            echo '```'
             echo '## build.log tail'; echo '```'
-            tail -60 dm-work/build/shell/build.log 2>/dev/null || echo '(no build.log)'
+            tail -40 dm-work/build/shell/build.log 2>/dev/null || echo '(none)'
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
       - name: artifact
@@ -72,5 +77,6 @@ jobs:
             dm-work/build/shell/shell_info.txt
             dm-work/build/shell/build.log
             dm-work/build/shell/shell_files.tsv
+            dm-work/build/shell/script.log
           retention-days: 30
           if-no-files-found: warn

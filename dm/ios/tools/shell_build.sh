@@ -21,7 +21,7 @@ GD=$(python3 "$DM/games/game.py" dir "$GAME") || die "no game profile $GAME"
 [ -f "$GD/game.tsv" ] || die "no game profile $GD/game.tsv"
 ROOT=${DM_ROOT:-$HOME/dm-work}; O=$ROOT/build/shell; mkdir -p "$O"
 OUT=${1:-$O/DmIOS-shell-build-input.zip}
-for tool in xcodegen xcodebuild python3 make clang; do command -v $tool > /dev/null || die "缺工具 $tool（装 Xcode / xcodegen：brew install xcodegen）"; done
+for tool in xcodegen xcodebuild python3 make clang; do command -v $tool > /dev/null || die "缺工具 ${tool}（装 Xcode / xcodegen：brew install xcodegen）"; done
 # 壳的包名 / 团队号只是占位：自签工具装机时会换成使用者自己的 | the shell's bundle ID / team ID are placeholders; the sideloading tool replaces them at install time
 export DM_TEAM_ID=0000000000 DM_BUNDLE_ID=org.dmios.app DM_DISPLAY_NAME=${DM_DISPLAY_NAME:-Dm} DM_APP_VERSION=1.0 \
        DM_APP_CATEGORY=$(python3 "$DM/games/game.py" "$GAME" app_category) DM_FREE_ACCOUNT=1
@@ -78,4 +78,4 @@ t "核对：壳里没有模块映像节，也没有游戏内容"
 n=$(otool -l "$A/DmIOS" | grep -c -E 'sectname __dm.*x[01]|segname __DM.*W'); [ "$n" = 0 ] || die "壳的可执行文件里还有模块映像节 $n 个"
 ( cd "$A" && find . -type f | sort | while read -r f; do printf '%s\t%s\n' "$(stat -f %z "$f")" "$f"; done ) > "$O/shell_files.tsv"
 ( cd "$O" && rm -f "$OUT" && zip -qry "$(basename "$OUT")" Payload ) || die "zip"
-t "壳：$OUT（$(du -h "$OUT" | cut -f1)，$(wc -l < "$O/shell_files.tsv" | tr -d ' ') 个文件）；要补 $(grep -c . "$O/shell_manifest.txt") 项，清单 $O/shell_manifest.txt"
+t "壳：${OUT}（$(du -h "$OUT" | cut -f1)，$(wc -l < "$O/shell_files.tsv" | tr -d ' ') 个文件）；要补 $(grep -c . "$O/shell_manifest.txt") 项，清单 $O/shell_manifest.txt"
