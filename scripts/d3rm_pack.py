@@ -199,7 +199,8 @@ def main():
     tmp = args.out + '.part'; added = 0
     with zipfile.ZipFile(tmp, 'w') as o:
         for i in z.infolist(): o.writestr(i, z.read(i.filename))
-        for m in manifest + (['aoc/'] if aoc_note else []):
+        extra = ['dm/pack_info.txt']   # bookkeeping (the current app does not read it; D2R-mobile's does)
+        for m in dict.fromkeys(manifest + extra + (['aoc/'] if aoc_note else [])):
             src = os.path.join(stage, m)
             if not os.path.exists(src): continue
             files = [os.path.join(d, f) for d, _, fs in sorted(os.walk(src)) for f in sorted(fs)] if m.endswith('/') else [src]
