@@ -14,8 +14,12 @@ on:
     paths: ['dm/**', 'scripts/d3rm_pack.py', '.github/workflows/build-shell.yml']
 
 jobs:
+  canary:                      # 探针：Ubuntu 池若秒分配、macOS 仍排队，就是 macOS 池或账号层面的限制，不是仓库配置
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "ubuntu runner ok"
   shell:
-    runs-on: macos-15
+    runs-on: macos-26          # the current standard image (macos-latest points here): default Xcode 26.x, i.e. the iOS 26 SDK the project needs
     env:
       GAME: ${{ github.event.inputs.game || '01001B300B9BE000' }}
       DM_ROOT: ${{ github.workspace }}/dm-work
@@ -23,6 +27,14 @@ jobs:
       HOMEBREW_NO_INSTALL_CLEANUP: "1"
     steps:
       - uses: actions/checkout@v4
+      - name: newest Xcode (the project needs the iOS 26 SDK)
+        run: |
+          set -x
+          xcodebuild -version || true
+          XC=$(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V | tail -1)
+          if [ -n "$XC" ]; then sudo xcode-select -s "$XC"; fi
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
       - name: tools (xcodegen, fontTools)
         run: |
           set -x
