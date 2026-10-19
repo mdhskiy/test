@@ -100,6 +100,10 @@ HLE_FORCE("_ZN2nn4pctl53RequestStereoVisionRestrictionConfigurationPermissionEv"
 HLE_FORCE("_ZN2nn4pctl20EndFreeCommunicationEv", "家长控制·与他人通信", void, h_pctl_End, void) {}
 // Engage asks on entering a battle map (no UI); without this the SDK connects to the pctl service through sm, which the host does not have, and aborts
 HLE_FORCE("_ZN2nn4pctl28IsFreeCommunicationAvailableEv", "家长控制·与他人通信可用否，联网排除；恒否", unsigned, h_pctl_IsFree, void) { return 0; }
+// D3 asks this at startup (main+0x557e8, show_ui=false); its SDK implementation connects to the pctl
+// service first, which the host does not provide, and the ipc session init asserts. A console without a
+// parental restriction answers "permitted" (the SDK returns w0 = (Result == 0)).
+HLE_FORCE("_ZN2nn4pctl32CheckFreeCommunicationPermissionEb", "家长控制·与他人通信的许可检查（D3 启动即问）；宿主无 pctl 服务，SDK 取服务时断言；按无限制账号答「许可」", unsigned, h_pctl_CheckPerm, unsigned show_ui) { (void)show_ui; return 1; }
 // The Legend of Zelda: Breath of the Wild: checks the parental-control permission for stereoscopic 3D before VR-related screens (returns bool; the argument = whether to show UI, the game passes 0). The host has no parental controls: permitted
 HLE_FORCE("_ZN2nn4pctl27CheckStereoVisionPermissionEb", "家长控制·3D 立体显示许可；宿主无家长控制，允许", unsigned, h_pctl_Stereo, unsigned show_ui) { (void)show_ui; return 1; }
 
