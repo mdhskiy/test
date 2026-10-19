@@ -42,3 +42,9 @@ nvn_ssbo_bases	vs=0x110 ps=0x510 cs=0x310
 # ---- Shader split ----
 shader_groups	/CPKs/=cpks /Update/=update
 shader_note	Diablo III: Eternal Collection shaders (provisional profile)
+
+# ---- Textures ----
+# D3 streams every texture from the CPKs into memory pools through the CPU; without these the host treats
+# them as GPU-written and binds a freshly zeroed MTL texture (all textures black, only font text visible).
+tex_flush_upload	on
+tex_dirty_upload	on
