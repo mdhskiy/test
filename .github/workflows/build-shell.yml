@@ -19,7 +19,13 @@ jobs:
     steps:
       - run: echo "ubuntu runner ok"
   shell:
-    runs-on: macos-26          # the current standard image (macos-latest points here): default Xcode 26.x, i.e. the iOS 26 SDK the project needs
+    # 两个镜像同时排：macOS 池紧时哪个先分到机器就用哪个（两边都装了 Xcode 26，下面的步骤选最新那个）
+    # Both images queue at once: whichever gets a runner first wins (both carry Xcode 26; the step below selects the newest)
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-26, macos-15]
+    runs-on: ${{ matrix.os }}
     env:
       GAME: ${{ github.event.inputs.game || '01001B300B9BE000' }}
       DM_ROOT: ${{ github.workspace }}/dm-work
@@ -70,7 +76,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: DmIOS-shell
+          name: DmIOS-shell-${{ matrix.os }}
           path: |
             dm-work/build/shell/DmIOS-shell-build-input.zip
             dm-work/build/shell/shell_manifest.txt
