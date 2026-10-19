@@ -23,7 +23,7 @@ ROOT=${DM_ROOT:-$HOME/dm-work}; O=$ROOT/build/shell; mkdir -p "$O"
 OUT=${1:-$O/DmIOS-shell-build-input.zip}
 for tool in xcodegen xcodebuild python3 make clang; do command -v $tool > /dev/null || die "缺工具 ${tool}（装 Xcode / xcodegen：brew install xcodegen）"; done
 # 壳的包名 / 团队号只是占位：自签工具装机时会换成使用者自己的 | the shell's bundle ID / team ID are placeholders; the sideloading tool replaces them at install time
-export DM_TEAM_ID=0000000000 DM_BUNDLE_ID=org.dmios.app DM_DISPLAY_NAME=${DM_DISPLAY_NAME:-Dm} DM_APP_VERSION=1.0 \
+export DM_TEAM_ID=0000000000 DM_BUNDLE_ID=org.dmios.app DM_DISPLAY_NAME=${DM_DISPLAY_NAME:-$(python3 "$DM/games/game.py" "$GAME" app_name 2>/dev/null || echo Dm)} DM_APP_VERSION=1.0 \
        DM_APP_CATEGORY=$(python3 "$DM/games/game.py" "$GAME" app_category) DM_FREE_ACCOUNT=1
 cd "$IOS" || die "cd $IOS"
 
@@ -37,6 +37,14 @@ echo '// 壳：模块映像不在可执行文件里（ios/tools/shell_build.sh�
 echo "OTHER_CFLAGS = \$(inherited) -DDM_SHELL" >> Gen/dm.xcconfig
 grep -q -- '-DDM_SHELL' Gen/dm.xcconfig || die "构建配置没改对：$(grep -n OTHER_ Gen/dm.xcconfig)"
 printf '{"info":{"author":"xcode","version":1}}\n' > Gen/Assets.xcassets/Contents.json
+ICON=$GD/icon.png
+if [ -f "$ICON" ]; then
+  mkdir -p Gen/Assets.xcassets/AppIcon.appiconset
+  cp "$ICON" Gen/Assets.xcassets/AppIcon.appiconset/icon1024.png
+  printf '{"images":[{"filename":"icon1024.png","idiom":"universal","platform":"ios","size":"1024x1024"}],"info":{"author":"xcode","version":1}}\n' > Gen/Assets.xcassets/AppIcon.appiconset/Contents.json
+  echo "DM_APPICON = AppIcon" >> Gen/dm.xcconfig
+  t "图标 $(python3 -c "import struct,sys; d=open(sys.argv[1],'rb').read(33); w,h=struct.unpack('>II', d[16:24]); print(f'{w}x{h}')" "$ICON") → AppIcon"
+fi
 # 通用字体随壳走（不是游戏内容）：standard = macOS 的 Arial Unicode，nintendo_ext = 按钮图标（fontTools 生成）
 # The generic fonts travel with the shell (not game content): standard = macOS's Arial Unicode, nintendo_ext = button icons (needs fontTools)
 mkdir -p Gen/dm/font

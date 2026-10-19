@@ -57,3 +57,6 @@ tex_dirty_upload	on
 # time instead of 0 (the real GPU puts the time in the second field), so the game's "counter == counter" comparisons never hold and
 # every conditional clear / draw runs anyway: wasted GPU work (frame drops with many monsters) and clears the game wanted skipped.
 render_cond	on
+
+# ---- App identity ----
+app_name	DIABLO3
