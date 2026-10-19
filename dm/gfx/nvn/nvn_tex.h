@@ -16,6 +16,7 @@ typedef struct {
 
 void nvn_tex_layout(const nvn_texdesc *d, nvn_texlayout *o);
 uint64_t nvn_tex_level_offset(const nvn_texdesc *d, unsigned level);
+ptrdiff_t nvn_tex_row_stride(const nvn_texdesc *d);   // Row pitch in bytes of level 0 (nvnTextureGetStride)
 int nvn_fmt_bpb(int format, int *bw, int *bh);   // Bytes per block (0 = unknown format), block width and height
 // Block height / block depth actually used by level `level` (log2 of the GOB count): the per-level block height shrinks with that level's row count (block rows), and deswizzling uses it level by level
 void nvn_tex_level_tiles(const nvn_texdesc *d, unsigned level, unsigned *tileH, unsigned *tileD);

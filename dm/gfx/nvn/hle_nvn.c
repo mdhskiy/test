@@ -267,9 +267,12 @@ NVN(nvnTextureBuilderGetStorageSize, size_t, const NVNtextureBuilder *b) {
     log_layout((const tex_builder_t *)b, &L);
     return L.size;
 }
+NVN(nvnTextureBuilderGetStride, ptrdiff_t, const NVNtextureBuilder *b) { return nvn_tex_row_stride(&((const tex_builder_t *)b)->d); }
 NVN(nvnTextureBuilderGetStorageAlignment, size_t, const NVNtextureBuilder *b) {
     nvn_texlayout L; nvn_tex_layout(&((const tex_builder_t *)b)->d, &L); return L.align;
 }
+// D3 asks this on every texture it creates (right after WindowInitialize); the red-stub answer (0) made it size its upload data from a zero row pitch.
+NVN(nvnTextureGetStride, ptrdiff_t, const NVNtexture *t) { return nvn_tex_row_stride(&((const tex_t *)t)->d); }
 #define TX(t) ((tex_t *)(t))
 #define CTX(t) ((const tex_t *)(t))
 // Textures the CPU fills in place (profile tex_flush_upload): Tears of the Kingdom streams its textures (TexToGo, already in the GPU's block-linear layout) straight into

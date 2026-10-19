@@ -111,6 +111,19 @@ void nvn_tex_layout(const nvn_texdesc *d, nvn_texlayout *o) {
     o->align = 512;
 }
 
+// Row pitch in bytes of level 0 (nvnTextureGetStride / nvnTextureBuilderGetStride): LINEAR textures use the builder's stride or the 32/128-aligned row,
+// block-linear (tiled) textures the pixel row rounded up to the 64-byte GOB width; BUFFER textures one element per row. D3 asks right after texture creation.
+ptrdiff_t nvn_tex_row_stride(const nvn_texdesc *d) {
+    fmt_t t = fmt_of(d->format);
+    if (!t.bpb) return 0;
+    unsigned dpl; int layered; uint32_t w, h, z;
+    shape(d, &dpl, &layered, &w, &h, &z);
+    if (d->target == 10) return (ptrdiff_t)t.bpb;
+    uint32_t bpr = t.bpb * blk(w, t.bw);
+    if (d->flags & 0x10) { uint32_t al = (d->flags & 0x40) ? 128 : 32; return (ptrdiff_t)(d->stride ? d->stride : (bpr + al - 1) & ~(al - 1)); }
+    return (ptrdiff_t)((bpr + 63) & ~63u);
+}
+
 uint64_t nvn_tex_level_offset(const nvn_texdesc *d, unsigned level) {
     fmt_t t = fmt_of(d->format);
     unsigned dpl; int layered; uint32_t w, h, z;
