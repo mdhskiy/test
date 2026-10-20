@@ -1089,10 +1089,15 @@ NVN(nvnWindowInitialize, NVNboolean, NVNwindow *w, const NVNwindowBuilder *b) {
 }
 NVN(nvnWindowGetPresentInterval, int, const NVNwindow *w) { return ((const win_t *)w)->interval; }   // Link's Awakening reads it back every frame
 NVN(nvnWindowSetPresentInterval, void, NVNwindow *w, int v) { if (((win_t *)w)->interval != v) LOG("[nvn] 游戏设出图间隔 %d → %d", ((win_t *)w)->interval, v); ((win_t *)w)->interval = v; }
+// The host's own display-size override for a game that renders at an aspect ratio of its own: hle_oe.c defines it for Diablo III (its
+// settings struct holds the size the whole dynamic-resolution range is a fraction of). Weak: no other build has one, and the game
+// setting the crop every frame is the one place that sees the size it is actually rendering at right now.
+extern void dm_d3_res_tick(uint32_t w, uint32_t h) __attribute__((weak));
 NVN(nvnWindowSetCrop, void, NVNwindow *w, int x, int y, int ww, int hh) {
     win_t *o = (win_t *)w; int v[4] = {x, y, ww, hh};
     if (memcmp(o->crop, v, sizeof v)) LOG("[nvn] WindowCrop %d,%d %dx%d", x, y, ww, hh);
     memcpy(o->crop, v, sizeof v);
+    if (dm_d3_res_tick && ww > 0 && hh > 0) dm_d3_res_tick((uint32_t)ww, (uint32_t)hh);
 }
 static void trow(uint64_t f, const char *name, double v);
 static void set_time_constraint(uint64_t period_ns);

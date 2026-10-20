@@ -244,6 +244,47 @@ static void scale3d_tick(void) {
     LOG("3D 渲染比例 %.2f：3D 目标 %ux%u，输出 %ux%u（帧 %llu）", want, *(uint32_t *)(renderer + 0xee78), *(uint32_t *)(renderer + 0xee7c),
         *(uint32_t *)(renderer + 0xee88), *(uint32_t *)(renderer + 0xee8c), (unsigned long long)dm_nvn_frame_count());
 }
+// ---------- Diablo III: the size its dynamic resolution is a fraction of ----------
+// The game does not read a resolution from the host (its rewriter output has no resolution parameter sites at all), and every
+// resolution its Switch build produces is 16:9, because that is the Switch's own display ratio: Digital Foundry measured 1600x900
+// down to 1344x756 docked and 1280x720 down to 960x540 handheld. On a 2.17:1 phone that always leaves bars, and no amount of
+// raising the resolution changes that -- the ratio has to change.
+// The size the whole range is a fraction of lives in the game's settings struct, which is at a static address in main's data: the
+// registration function at main+0x27c1a0 is called nine times with x2 = main+0x181ab18 plus an offset (main+0x181ac80 for the
+// group holding DisplayModeWidth / DisplayModeHeight, registered at main+0x27c9ec and main+0x27d084, beside Gamma and
+// ShadowQuality). All of it is in bss, so the values only exist at run time.
+// The pair is found by looking for the size the game is rendering at right now (the window crop, which it sets every frame) inside
+// that region, so a build in which the address moved is not written at random. Writing it moves the whole range, ratio included.
+// DM_D3_RES=<width>x<height> picks the size (the front end's screen pixels by default, front_game_res); DM_D3_RES=0 leaves the
+// game's own values alone.
+void dm_d3_res_tick(uint32_t w, uint32_t h) {
+    static int init; static module_t *main; static uint32_t *pair, want_w, want_h; static int logged;
+    if (!init) {
+        init = 1;
+        const char *e = getenv("DM_D3_RES");
+        if (e && (!strcmp(e, "0") || !strcmp(e, "off"))) { LOG("D3 显示尺寸：DM_D3_RES=%s，用游戏自己的", e); return; }
+        if (e) { unsigned a, b; if (sscanf(e, "%ux%u", &a, &b) == 2 && a >= 640 && b >= 360) { want_w = a; want_h = b; } }
+        if (!want_w) { uint64_t r = dm_game_res(1); want_w = (uint32_t)r; want_h = (uint32_t)(r >> 32); }
+        for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) main = &g_mod[i];
+        // As with the D2R addresses above: only this build has the settings struct there. Anything else must not be written to.
+        if (!main || strcmp(main->build_id, "2607a74f5df7754cc0357b5df7e49693")) {
+            LOG("D3 显示尺寸：main 构建 %s 不是 D3 v1441792，不改（地址只对这一版有效）", main && main->build_id[0] ? main->build_id : "（产物无构建号）"); main = NULL; }
+    }
+    if (!main) return;
+    if (!pair) {
+        uint32_t *lo = (uint32_t *)(main->base + 0x181ab00), *hi = (uint32_t *)(main->base + 0x181c000);
+        for (uint32_t *q = lo; q + 1 < hi; q++) if (*q == w && q[1] == h) { pair = q; break; }   // the size being rendered at
+        if (!pair) {   // not found: the game may be holding the top of the range while rendering a scaled-down frame
+            static const uint32_t known[][2] = {{1600, 900}, {1280, 720}, {1920, 1080}, {1344, 756}, {960, 540}};
+            for (int k = 0; k < 5 && !pair; k++) for (uint32_t *q = lo; q + 1 < hi; q++) if (*q == known[k][0] && q[1] == known[k][1]) { pair = q; break; }
+        }
+        if (!pair) { if (!logged++) LOG("D3 显示尺寸：设置区里没找到 %ux%u 也没找到已知档位，不改（游戏画面 %ux%u）", w, h, w, h); return; }
+        LOG("D3 显示尺寸：设置区 main+%#tx 处是 %ux%u → 改成 %ux%u（DM_D3_RES 可改 / 0 关闭）",
+            (ptrdiff_t)((uint8_t *)pair - main->base), pair[0], pair[1], want_w, want_h);
+    }
+    if (pair[0] == want_w && pair[1] == want_h) return;   // the game keeps the value: nothing to do
+    dm_guest_write_prepare(pair, 8); pair[0] = want_w; pair[1] = want_h;
+}
 HLE_FORCE("_ZN2nn2oe25TryPopNotificationMessageEPj", "系统通知队列；前端状态变化入队", unsigned, h_oe_TryPopMsg, uint32_t *msg) {
     scale3d_tick();
     pthread_once(&g_oe_once, oe_script_start);
