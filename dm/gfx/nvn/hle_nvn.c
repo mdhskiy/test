@@ -319,9 +319,7 @@ int nvn_ft_written(const tex_t *t) {
 // Each poll looks at no more than FT_POLL_BYTES of registered textures, going on where the last one stopped; any guest write starts another pass over the whole list.
 // Checking every texture at every submission cost TOTK 0.4 ms of submit CPU per frame on the Mac; this way a texture is picked up a few submissions later at most
 enum { FT_POLL_BYTES = 128 << 20 };
-void mtl_lsh_sync_all(void) __attribute__((weak));   // nvn_mtl.m: refresh every padded linear-texture copy from guest memory
 void nvn_ft_poll(void) {
-    if (mtl_lsh_sync_all) mtl_lsh_sync_all();
     if (!DM_GAME_TEX_DIRTY_UPLOAD) return;
     static uint64_t gen; static size_t cur, left;
     static tex_t *hit; static size_t chit; size_t nhit = 0;

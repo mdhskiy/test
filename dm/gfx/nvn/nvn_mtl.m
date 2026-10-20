@@ -1451,65 +1451,11 @@ static id<MTLTexture> tex_linear(const tex_t *t) {
     if (!mtl_addr((uint64_t)t->mem, (uint64_t)row * (t->d.height ? t->d.height : 1), &mb, &mo)) { RED_ONCE(64, "线性贴图的存储不在内存池里（%ux%u 格式 %#x）", t->d.width, t->d.height, t->d.format); return nil; }
     id<MTLBuffer> b = (__bridge id<MTLBuffer>)mb;
     NSUInteger al = [g_dev minimumLinearTextureAlignmentForPixelFormat:(MTLPixelFormat)pf];
-    if (mo % al || row % al) return nil;   // tex_linear_shadow in tex_mtl_ takes these; a red line is printed there only when that fails too
+    if (mo % al || row % al) { RED_ONCE(65, "线性贴图偏移 %#llx / 行距 %zu 不满足 %lu 字节对齐，按私有贴图建（CPU 写入不可见）", (unsigned long long)mo, row, (unsigned long)al); return nil; }
     MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:(MTLPixelFormat)pf width:t->d.width ? t->d.width : 1 height:t->d.height ? t->d.height : 1 mipmapped:NO];
     d.resourceOptions = b.resourceOptions;
     d.usage = MTLTextureUsageShaderRead | (t->d.flags & NVN_TEXTURE_FLAGS_IMAGE ? MTLTextureUsageShaderWrite : 0) | (t->d.flags & NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET ? MTLTextureUsageRenderTarget : 0);
     return [b newTextureWithDescriptor:d offset:mo bytesPerRow:row];
-}
-// A linear texture whose offset or row stride is not a multiple of minimumLinearTextureAlignmentForPixelFormat cannot be made on the pool buffer, and the generic path then
-// builds a GPU-private texture that never sees the CPU's writes -- D3 rewrites 32x32 R8 light LUTs (row stride 32) from the CPU and they come out as noise. Keep a shared host
-// texture of the same size and push the guest rows into it with replaceRegion whenever they change (replaceRegion takes any row stride; a buffer-backed texture does not).
-typedef struct { uint64_t serial; void *tex; const uint8_t *src; uint8_t *copy; uint32_t w, h, row; int used; } lshadow_t;
-static lshadow_t g_lsh[64];
-static lshadow_t *lsh_find(uint64_t serial) {
-    for (int i = 0; i < 64; i++) if (g_lsh[i].used && g_lsh[i].serial == serial) return &g_lsh[i];
-    return NULL;
-}
-static int lsh_sync(lshadow_t *s) {   // push the rows the CPU changed since the last upload (a few KB at most)
-    if (!s || !s->used || !s->src || !s->copy || !s->tex) return 0;
-    void *mb; uint64_t mo;   // the pool may have been finalized since: reading its memory then is exactly the random-crash shape, so stop
-    if (!mtl_addr((uint64_t)s->src, (size_t)s->row * s->h, &mb, &mo)) { s->used = 0; s->src = NULL; return 0; }
-    int changed = 0;
-    for (uint32_t y = 0; y < s->h; y++) {
-        const uint8_t *p = s->src + (size_t)y * s->row; uint8_t *q = s->copy + (size_t)y * s->row;
-        if (memcmp(p, q, s->row)) { memcpy(q, p, s->row); changed++; }
-    }
-    if (!changed) return 0;
-    [(__bridge id<MTLTexture>)s->tex replaceRegion:MTLRegionMake2D(0, 0, s->w, s->h) mipmapLevel:0 withBytes:s->copy bytesPerRow:s->row];
-    return changed;
-}
-static void lsh_sync_serial(uint64_t serial) { lshadow_t *s = lsh_find(serial); if (s) lsh_sync(s); }
-void mtl_lsh_sync_all(void) { for (int i = 0; i < 64; i++) if (g_lsh[i].used) lsh_sync(&g_lsh[i]); }   // once per submission (nvn_ft_poll): these LUTs are rewritten by the CPU every frame
-static id<MTLTexture> tex_linear_shadow(const tex_t *t) {
-    if (!(t->d.flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET)) || !t->mem || !t->pool || (t->pool->flags & NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS)) return nil;
-    if (t->d.target != NVN_TEXTURE_TARGET_2D || t->d.levels > 1 || t->d.samples > 1) return nil;
-    uint32_t pf = 0; uint8_t swz[4]; int bw, bh, bpb = nvn_fmt_bpb(t->d.format, &bw, &bh);
-    if (!nvn_fmt_to_mtl(t->d.format, &pf, swz) || !pf || !bpb || bw != 1 || bh != 1) return nil;
-    uint32_t w = t->d.width ? t->d.width : 1, h = t->d.height ? t->d.height : 1;
-    size_t row = t->d.stride ? t->d.stride : (size_t)w * bpb;
-    void *mb; uint64_t mo;
-    if (!mtl_addr((uint64_t)t->mem, (uint64_t)row * h, &mb, &mo)) return nil;
-    NSUInteger al = [g_dev minimumLinearTextureAlignmentForPixelFormat:(MTLPixelFormat)pf];
-    if (mo % al == 0 && row % al == 0) return nil;   // tex_linear takes this one
-    size_t need = (size_t)row * h;
-    if (!need || need > (1u << 20)) { RED_ONCE(97, "线性贴图 %ux%u 行距 %zu 未对齐且过大（%zu 字节），仍按私有贴图建", w, h, row, need); return nil; }
-    lshadow_t *s = NULL; for (int i = 0; i < 64 && !s; i++) if (!g_lsh[i].used) s = &g_lsh[i];
-    if (!s) { RED_ONCE(98, "线性贴图共享副本表已满（64 张），%ux%u 行距 %zu 仍按私有贴图建", w, h, row); return nil; }
-    MTLTextureDescriptor *dd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:(MTLPixelFormat)pf width:w height:h mipmapped:NO];
-    dd.resourceOptions = MTLResourceStorageModeShared;
-    dd.usage = MTLTextureUsageShaderRead | (t->d.flags & NVN_TEXTURE_FLAGS_IMAGE ? MTLTextureUsageShaderWrite : 0) | (t->d.flags & NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET ? MTLTextureUsageRenderTarget : 0);
-    id<MTLTexture> tx = [g_dev newTextureWithDescriptor:dd];
-    if (!tx) return nil;
-    uint8_t *cp = malloc(need); if (!cp) return nil;
-    memcpy(cp, (const uint8_t *)t->mem, need);
-    s->serial = t->serial; s->tex = (void *)CFBridgingRetain(tx); s->src = (const uint8_t *)t->mem; s->copy = cp;
-    s->w = w; s->h = h; s->row = (uint32_t)row; s->used = 1;
-    [tx replaceRegion:MTLRegionMake2D(0, 0, w, h) mipmapLevel:0 withBytes:cp bytesPerRow:row];
-    res_add(tx);
-    MLOG("线性贴图 %ux%u 格式 %#x：偏移 %#llx / 行距 %zu 不满足 %lu 字节对齐 → 建共享贴图，CPU 改动时 replaceRegion 推上去（%zu 字节）",
-         w, h, t->d.format, (unsigned long long)mo, row, (unsigned long)al, need);
-    return tx;
 }
 // CPU-written block-linear textures (WriteTexels): the game gave no packaged layout and changes the content from the CPU each frame (Engage's movie frames: a Y plane R8 + a UV plane RG8, WriteTexels every frame).
 // Only packaged textures used to be uploaded from guest memory, so such a texture became a GPU-only texture whose content stayed 0. Their serials are recorded and they resolve through the packaged path (upload + re-upload on dirty pages)
@@ -1523,7 +1469,6 @@ int mtl_tex_gpu_owned(uint64_t serial) {
 void mtl_tex_cpu_written(const tex_t *t) {
     uint64_t serial = t->serial;
     if (!serial) return;
-    if (lsh_find(serial)) { lsh_sync(lsh_find(serial)); return; }   // a linear texture on a padded shared copy: refresh it from guest memory (the CPU wrote it) instead of switching it to the packaged upload path, whose block-linear layout does not apply
     pthread_mutex_lock(&g_cpu_tex_mu);
     if (!g_cpu_tex) g_cpu_tex = CFSetCreateMutable(NULL, 0, NULL);
     int added = 0;
@@ -1545,7 +1490,6 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct) {
     tex_t *t = (tex_t *)ct;
     if (!t || !t->serial) return nil;
     if (t->magic != MAGIC('T', 'E', 'X', 0)) { RED_ONCE(70, "贴图对象已失效（magic %#x，首例 ser=%llu）：不建 MTLTexture", t->magic, (unsigned long long)t->serial); return nil; }
-    lsh_sync_serial(t->serial);   // linear textures on a padded shared copy: pick up what the CPU wrote since the last use (D3's light LUT)
     int packaged = (t->has_layout || tex_cpu_written(t->serial)) && t->mem;
     {   // Diagnostic DM_NVN_TEXINFO=WxH: log storage and description of textures of that size on first resolution (to tell whether two textures share storage and why they were not merged)
         static int ti = -1; static uint32_t tw, th; static uint64_t last[64]; static int nl;
@@ -1614,10 +1558,7 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct) {
     alias_key ak; memset(&ak, 0, sizeof ak); ak.pool = (uint64_t)(uintptr_t)t->pool; ak.off = t->off; ak.d = t->d;
     pthread_mutex_lock(&g_smu); __unsafe_unretained id shared = hm_get_id(&g_alias, &ak); pthread_mutex_unlock(&g_smu);
     if (shared) { tex_put(t->serial, shared); return shared; }
-    id<MTLTexture> mt = tex_linear(t);
-    if (!mt) mt = tex_linear_shadow(t);   // unaligned linear texture: a shared host texture fed by replaceRegion instead of a private one the CPU cannot write
-    if (!mt && (t->d.flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET)))
-        RED_ONCE(65, "线性贴图 %ux%u 偏移 %#llx / 行距 %u 建不出可写副本，按私有贴图建（CPU 写入不可见）", t->d.width, t->d.height, (unsigned long long)t->off, t->d.stride);
+    id<MTLTexture> mt = tex_linear(t);   // the padded-copy path added today made the lantern glow flicker, so it is gone: an unaligned linear texture is a private one again
     if (!mt) {
         MTLTextureDescriptor *d = tex_desc(t, 0);
         if (!d) return nil;
