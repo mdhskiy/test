@@ -8,6 +8,7 @@
 #include <stdatomic.h>
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
+#include <mach/vm_region.h>   // vm_region_basic_info_data_64_t / VM_REGION_BASIC_INFO_COUNT_64
 static _Atomic int g_opmode = -1;
 int dm_opmode(void) {
     int m = g_opmode;
