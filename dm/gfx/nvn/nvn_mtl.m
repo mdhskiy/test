@@ -6814,6 +6814,25 @@ static id<MTLTexture> present_raw_src(id<MTLTexture> src) {
     if (!v) { RED_ONCE(69, "出图：sRGB 交换链贴图的非 sRGB 视图建不出（格式 %lu），按解码后的值出图", (unsigned long)src.pixelFormat); return src; }
     return v;
 }
+// How much of the canvas the present covers when the game's aspect ratio differs from the screen's: 0 = fit the whole picture
+// in (bars where they differ), 1 = cover the canvas and crop the overflow. Both scale uniformly, so neither stretches the
+// picture; 1 is what "fullscreen" means on a phone wider than the game's 16:9 (a 17 Pro Max is 2868x1320, 2.17:1, and Diablo III
+// renders 1600x900: fitted, 521 of 2868 columns are black; covered, 18% of the picture's height falls outside the screen).
+// Values between the two crop part of the overflow and leave smaller bars. DM_PRESENT_FILL=<0-1> overrides it, also from
+// Documents/env.txt. Nothing to do when the ratios match (the <1% branch below), so games that render at the screen's ratio --
+// the game is told the screen's pixels, front_game_res -- are unaffected either way.
+static double g_present_fill = -1;
+static double present_scale(double dw, double dh, double cw, double ch) {
+    if (g_present_fill < 0) {
+        const char *e = getenv("DM_PRESENT_FILL"); g_present_fill = 1;
+        if (e) { char *end; double v = strtod(e, &end);
+            if (end != e && !*end && v >= 0 && v <= 1) g_present_fill = v;
+            else MLOG("【红】DM_PRESENT_FILL=%s：要 0（适应，留边）到 1（铺满，裁切），按 1 处理", e); }
+        MLOG("出图铺满 %.2f（0 留边 / 1 铺满裁切；画布与游戏画面宽高比一致时不起作用）", g_present_fill);
+    }
+    double fit = fmin(dw / cw, dh / ch), cover = fmax(dw / cw, dh / ch);
+    return fit + (cover - fit) * g_present_fill;
+}
 static int present_encode(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<MTLTexture> dst, const int crop[4]) {
     NSUInteger cx = 0, cy = 0, cw = src.width, ch = src.height;
     if (crop && (crop[2] || crop[3])) {
@@ -6829,9 +6848,10 @@ static int present_encode(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<MTLTex
              (unsigned long)cx, (unsigned long)cy, (unsigned long)cw, (unsigned long)ch, (unsigned long)dst.width, (unsigned long)dst.height); }
     present_pipeline(dst.pixelFormat);
     MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
-    // Keep the game picture's aspect ratio and center it, leaving black bars in the rest (no stretching when the screen ratio differs from the game's, e.g. iPhone about 19.5:9 versus the game's 16:9);
-    // when the ratio difference is < 1% (the remainder from the game width being a multiple of 8 in the full-screen setup, e.g. 1952x900 versus 2868x1320 differs by 0.17%) fill directly, leaving no few-pixel border
-    double dw = dst.width, dh = dst.height, s = fmin(dw / cw, dh / ch);
+    // Scale the game picture uniformly and center it: with DM_PRESENT_FILL=1 (the default) it covers the canvas and what does not
+    // fit is cropped, with 0 the whole picture fits and the rest of the canvas stays black -- never stretched, either way.
+    // When the ratio difference is < 1% (the remainder from the game width being a multiple of 8 in the full-screen setup, e.g. 1952x900 versus 2868x1320 differs by 0.17%) fill directly, leaving no few-pixel border
+    double dw = dst.width, dh = dst.height, s = present_scale(dw, dh, cw, ch);
     MTLViewport vp = {floor((dw - cw * s) / 2), floor((dh - ch * s) / 2), round(cw * s), round(ch * s), 0, 1};
     if (fabs((dw / dh) / ((double)cw / ch) - 1) < 0.01) vp = (MTLViewport){0, 0, dw, dh, 0, 1};
     int full = vp.originX == 0 && vp.originY == 0 && vp.width == dw && vp.height == dh;
@@ -6862,7 +6882,7 @@ static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MT
         cx = crop[0]; cy = crop[1]; cw = crop[2]; ch = crop[3];
     }
     present_pipeline(dst.pixelFormat);
-    double dw = dst.width, dh = dst.height, s = fmin(dw / cw, dh / ch);
+    double dw = dst.width, dh = dst.height, s = present_scale(dw, dh, cw, ch);
     MTLViewport vp = {floor((dw - cw * s) / 2), floor((dh - ch * s) / 2), round(cw * s), round(ch * s), 0, 1};
     if (fabs((dw / dh) / ((double)cw / ch) - 1) < 0.01) vp = (MTLViewport){0, 0, dw, dh, 0, 1};
     int full = vp.originX == 0 && vp.originY == 0 && vp.width == dw && vp.height == dh;
