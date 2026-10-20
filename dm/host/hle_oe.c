@@ -265,7 +265,10 @@ void dm_d3_res_tick(uint32_t w, uint32_t h) {
         const char *e = getenv("DM_D3_RES");
         if (e && (!strcmp(e, "0") || !strcmp(e, "off"))) { LOG("D3 显示尺寸：DM_D3_RES=%s，用游戏自己的", e); return; }
         if (e) { unsigned a, b; if (sscanf(e, "%ux%u", &a, &b) == 2 && a >= 640 && b >= 360) { want_w = a; want_h = b; } }
-        if (!want_w) { uint64_t r = dm_game_res(1); want_w = (uint32_t)r; want_h = (uint32_t)(r >> 32); }
+        // 1776x816 is 2.176:1 (the phone is 2.173:1) at 1.45 Mpx -- the same pixel budget as the game's own 1600x900, so the frame fills the screen with no bars
+        // and no crop at the same GPU cost. The screen's native 2868x1320 is 2.63x those pixels: measured GPU time is already 14.0 ms of the 16.67 ms budget at
+        // 1600x900, so native would run at about 27 fps. DM_D3_RES=<width>x<height> overrides this.
+        if (!want_w) { want_w = 1776; want_h = 816; }
         for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) main = &g_mod[i];
         // As with the D2R addresses above: only this build has the settings object there. Anything else must not be written to.
         if (!main || strcmp(main->build_id, "2607a74f5df7754cc0357b5df7e49693")) {
@@ -273,6 +276,17 @@ void dm_d3_res_tick(uint32_t w, uint32_t h) {
     }
     if (!main) return;
     if (!pw) {
+        // One-shot probe: where do the sizes the game could be rendering at actually live? The settings region is scanned for each value on its own (the width and the
+        // height are not adjacent), and the whole image is searched for the same values so a copy outside that region is not missed.
+        { const uint32_t cand[] = {1600, 900, 1920, 1080, 1280, 720, 1024, 768}; char ln[512];
+          for (int k = 0; k < 8; k++) { int n = snprintf(ln, sizeof ln, "D3 扫描设置区 %u：", cand[k]), c = 0;
+            for (uint32_t off = 0x181a000; off < 0x181e000; off += 4)
+                if (*(const uint32_t *)(main->base + off) == cand[k]) { if (c < 8) n += snprintf(ln + n, sizeof ln - n, " %#x", off); c++; }
+            if (c) LOG("%s（共 %d 处）", ln, c); }
+          for (int k = 0; k < 8; k++) { int n = snprintf(ln, sizeof ln, "D3 扫描全图 %u：", cand[k]), c = 0;
+            for (uint32_t off = 0; off + 4 <= main->size; off += 4)
+                if (*(const uint32_t *)(main->base + off) == cand[k]) { if (c < 10) n += snprintf(ln + n, sizeof ln - n, " %#x", off); c++; }
+            LOG("%s（共 %d 处）", ln, c); } }
         pw = (uint32_t *)(main->base + 0x181b294); ph = (uint32_t *)(main->base + 0x181b2bc);
         LOG("D3 显示尺寸：宽 main+0x181b294 = %u，高 main+0x181b2bc = %u（此刻渲染 %ux%u）→ 目标 %ux%u", *pw, *ph, w, h, want_w, want_h);
     }
