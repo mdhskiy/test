@@ -7,8 +7,7 @@
 // The operation mode is runtime state (the front end can change it: iOS overheat downgrade switches to handheld): the single source is here, taken once from DM_OPMODE at startup, the environment variable is not read again afterwards
 #include <stdatomic.h>
 #include <mach/mach.h>
-#include <mach/mach_vm.h>
-#include <mach/vm_region.h>   // vm_region_basic_info_data_64_t / VM_REGION_BASIC_INFO_COUNT_64
+#include <mach/vm_region.h>   // vm_region_basic_info_data_64_t / VM_REGION_BASIC_INFO_COUNT_64 (mach_vm.h is macOS-only: the iOS SDK rejects it)
 static _Atomic int g_opmode = -1;
 int dm_opmode(void) {
     int m = g_opmode;
@@ -268,10 +267,10 @@ static void scale3d_tick(void) {
 // rejected them (both candidates were reported "not in a known pool"); a region query is the honest test, and it keeps a wrong pointer from faulting.
 static int dm_addr_mapped(uint64_t a, uint64_t n) {
     if (!a) return 0;
-    mach_vm_address_t addr = (mach_vm_address_t)a; mach_vm_size_t size = 0;
+    vm_address_t addr = (vm_address_t)a; vm_size_t size = 0;
     vm_region_basic_info_data_64_t info; mach_port_t obj = MACH_PORT_NULL;
     mach_msg_type_number_t cnt = VM_REGION_BASIC_INFO_COUNT_64;
-    if (mach_vm_region(mach_task_self(), &addr, &size, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&info, &cnt, &obj) != KERN_SUCCESS) return 0;
+    if (vm_region_64(mach_task_self(), &addr, &size, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&info, &cnt, &obj) != KERN_SUCCESS) return 0;
     if (obj != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), obj);
     return addr <= a && a + n <= addr + size;
 }
