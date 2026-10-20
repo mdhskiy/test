@@ -50,7 +50,7 @@ jobs:
 
       matrix:
 
-        os: [macos-15]
+        os: [macos-26]
 
     runs-on: ${{ matrix.os }}
 
