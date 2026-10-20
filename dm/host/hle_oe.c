@@ -6,6 +6,8 @@
 
 // The operation mode is runtime state (the front end can change it: iOS overheat downgrade switches to handheld): the single source is here, taken once from DM_OPMODE at startup, the environment variable is not read again afterwards
 #include <stdatomic.h>
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
 static _Atomic int g_opmode = -1;
 int dm_opmode(void) {
     int m = g_opmode;
@@ -261,13 +263,22 @@ static void scale3d_tick(void) {
 // Nothing is written unless a candidate actually holds the size the game renders at right now, so a wrong pointer cannot corrupt anything.
 // 1776x816 is 2.176:1 (the phone is 2.173:1) at 1.45 Mpx, the same pixel budget as the game's 1600x900: fills the screen at no extra GPU cost (measured 14.0 ms of
 // the 16.67 ms budget at 1600x900; the screen's native 2868x1320 would be 2.63x). DM_D3_RES=<width>x<height> overrides it, 0 keeps the game's own size.
-extern int mtl_addr(uint64_t addr, uint64_t len, void **buf, uint64_t *off);   // nvn_mtl.m: is this address inside a registered memory pool?
+// Is this address range actually mapped in our task? The graphics globals live on the game's own heap, not in an NVN pool, so the pool check that mtl_addr does
+// rejected them (both candidates were reported "not in a known pool"); a region query is the honest test, and it keeps a wrong pointer from faulting.
+static int dm_addr_mapped(uint64_t a, uint64_t n) {
+    if (!a) return 0;
+    mach_vm_address_t addr = (mach_vm_address_t)a; mach_vm_size_t size = 0;
+    vm_region_basic_info_data_64_t info; mach_port_t obj = MACH_PORT_NULL;
+    mach_msg_type_number_t cnt = VM_REGION_BASIC_INFO_COUNT_64;
+    if (mach_vm_region(mach_task_self(), &addr, &size, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&info, &cnt, &obj) != KERN_SUCCESS) return 0;
+    if (obj != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), obj);
+    return addr <= a && a + n <= addr + size;
+}
 typedef struct { const char *what; uint32_t *w[4], *h[4]; int nw, nh; float *aspect; } d3_res_site;
 static d3_res_site g_res[8]; static int g_nres;
-static int d3_ptr_ok(module_t *m, uintptr_t a) {   // a pointer the game stored: not inside the image itself, and inside a pool we know
-    void *mb; uint64_t mo;
+static int d3_ptr_ok(module_t *m, uintptr_t a) {   // a pointer the game stored: outside the image, and the block we are about to read is mapped
     if (!a || (a >= (uintptr_t)m->base && a < (uintptr_t)m->base + m->size)) return 0;
-    return mtl_addr(a, 0x20, &mb, &mo);
+    return dm_addr_mapped(a, 0x60);
 }
 // Collect every slot in the candidate block that holds the size being rendered at right now (Globals keeps the device size and the reduced size as two adjacent
 // pairs, so one slot each is not enough), plus the aspect ratio float beside them. Written only when both a width and a height slot were found.
@@ -299,7 +310,7 @@ void dm_d3_res_tick(uint32_t w, uint32_t h) {
     if (!main) return;
     if (!g_nres) {   // find the sites once, then only write
         uintptr_t g1 = *(uintptr_t *)(main->base + 0x114C970);
-        if (g1 && !d3_ptr_ok(main, g1) && notes++ < 4) LOG("D3 显示尺寸：0x114C970 → %p 不在已知内存池里，跳过", (void *)g1);
+        if (g1 && !d3_ptr_ok(main, g1) && notes++ < 4) LOG("D3 显示尺寸：0x114C970 → %p 所在内存未映射，跳过", (void *)g1);
         if (d3_ptr_ok(main, g1)) {
             uint8_t *p = (uint8_t *)g1;
             LOG("D3 显示尺寸：main+0x114C970 → %p，头 0x16 字节 %08x %08x %08x %08x %08x %08x", (void *)g1,
@@ -307,7 +318,7 @@ void dm_d3_res_tick(uint32_t w, uint32_t h) {
             d3_add_site("Globals(0x114C970)", p, w, h, 8);
         }
         uintptr_t g2 = *(uintptr_t *)(main->base + 0x1150470);
-        if (g2 && !d3_ptr_ok(main, g2) && notes++ < 4) LOG("D3 显示尺寸：0x1150470 → %p 不在已知内存池里，跳过", (void *)g2);
+        if (g2 && !d3_ptr_ok(main, g2) && notes++ < 4) LOG("D3 显示尺寸：0x1150470 → %p 所在内存未映射，跳过", (void *)g2);
         if (d3_ptr_ok(main, g2)) {
             uint8_t *p = (uint8_t *)g2;
             uint64_t q[8]; memcpy(q, p + 0x224, sizeof q);
