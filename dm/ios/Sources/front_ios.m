@@ -1,4 +1,5 @@
-// iOS front end (the iOS implementation of front.h): a centered 16:9 Metal view (black bars on both sides) + a full-screen virtual gamepad layer (DmGamepad.m, controls drawn over the picture).
+// iOS front end (the iOS implementation of front.h): a Metal view covering the whole screen + a full-screen virtual gamepad layer (DmGamepad.m, controls drawn over the picture).
+// The game is told the screen's own pixels (front_game_res), so it renders at the screen's aspect ratio and the picture fills it with no black bars and no stretching.
 // The host runs on the big-stack thread started by main.m; front_run runs the guest directly on the calling thread.
 #import <UIKit/UIKit.h>
 #import <QuartzCore/CAMetalLayer.h>
@@ -62,10 +63,11 @@ static void front_ios_power_watch(void);
 }
 - (void)viewDidLayoutSubviews {
     [super viewDidLayoutSubviews];
-    CGRect b = self.view.bounds; if (!self.game) return;
-    CGFloat w = b.size.width, h = b.size.height;   // Fit 16:9 into the whole screen
-    if (w / h > 16.0 / 9.0) w = h * 16.0 / 9.0; else h = w * 9.0 / 16.0;
-    self.game.frame = CGRectMake(floor((b.size.width - w) / 2), floor((b.size.height - h) / 2), w, h);
+    if (!self.game) return;
+    // The whole screen: the game renders at the screen's aspect ratio (front_game_res), so filling it neither stretches the
+    // picture nor leaves a bar. It used to be fitted to 16:9 and centred, which put a black bar on each side of any wider
+    // phone (a 17 Pro Max is 2868x1320, 2.17:1, so 522 of its 2868 columns were black).
+    self.game.frame = self.view.bounds;
 }
 - (void)viewDidAppear:(BOOL)a { [super viewDidAppear:a]; front_ios_boot(); }
 - (BOOL)prefersHomeIndicatorAutoHidden { return YES; }
@@ -89,7 +91,33 @@ static void front_ios_power_watch(void) {
 }
 
 void *front_metal_layer(void) { return (__bridge void *)g_layer; }
-uint64_t front_game_res(int docked) { return docked ? 900ull << 32 | 1600 : 720ull << 32 | 1280; }   // Same as Mac: the original 16:9 constants
+// The render resolution the game is told (dm_game_res → the rewriter's KRES0 / KRES1 parameter slots, thread.c guest_thread_init):
+// the screen's own pixels, so the picture fills it at the screen's aspect ratio. The Switch's 16:9 constants (1600x900 docked)
+// are what "not fullscreen" was: a 2.17:1 phone got a black bar on each side, and the picture was scaled up into a larger area.
+//   DM_GAME_RES=<width>x<height>  sets it directly (docked)
+//   DM_GAME_RES_SCALE=<0.25-1>    scales the screen's size: the one knob for GPU cost. At 1.0 a 17 Pro Max renders 2868x1320,
+//                                 2.6x the pixels of 1600x900; 0.8 is 2294x1056, 0.7 is 2008x924.
+// Both are also read from Documents/env.txt, so the scale can be changed on the phone without rebuilding the app.
+// Handheld is 0.8 of docked, as the original 1280x720 was of 1600x900. KASPECT / KASPECTUI follow from these (thread.c), so
+// the game's UI is told the screen is wider than 16:9. Keep the screen's aspect ratio when overriding, or the picture stretches.
+static int g_res_w, g_res_h;
+static void game_res_init(void) {
+    CGRect nb = UIScreen.mainScreen.nativeBounds;      // device pixels, always in the portrait-up orientation
+    CGFloat sw = MAX(nb.size.width, nb.size.height), sh = MIN(nb.size.width, nb.size.height);   // the app is landscape-only
+    CGFloat w = sw, h = sh;
+    const char *e = getenv("DM_GAME_RES"); unsigned ew, eh;
+    if (e && sscanf(e, "%ux%u", &ew, &eh) == 2 && ew >= 640 && eh >= 360) { w = ew; h = eh; }
+    else { const char *s = getenv("DM_GAME_RES_SCALE"); if (s) { char *end; float f = strtof(s, &end);
+        if (end != s && !*end && f >= 0.25f && f <= 1.0f) { w = (int)(sw * f); h = (int)(sh * f); } } }
+    g_res_w = ((int)w) & ~3; g_res_h = ((int)h) & ~3;   // a multiple of 4, as the original constants were
+    LOG("前端：屏幕 %.0fx%.0f 像素，游戏渲染 %dx%d（DM_GAME_RES / DM_GAME_RES_SCALE 可改，也可写进 Documents/env.txt）", sw, sh, g_res_w, g_res_h);
+}
+uint64_t front_game_res(int docked) {
+    static dispatch_once_t once; dispatch_once(&once, ^{ game_res_init(); });
+    if (docked) return (uint64_t)g_res_h << 32 | (uint64_t)g_res_w;
+    int w = (g_res_w * 4 / 5) & ~3, h = (g_res_h * 4 / 5) & ~3;
+    return (uint64_t)h << 32 | (uint64_t)w;
+}
 void front_run(void (*guest)(void)) { guest(); }   // Already on main.m's big-stack thread
 
 // Software keyboard: show a UIAlertController on the main thread, the calling thread waits for the result

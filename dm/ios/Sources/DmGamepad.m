@@ -221,17 +221,17 @@ static CGFloat dist(CGPoint a, CGPoint b) { return hypot(a.x - b.x, a.y - b.y); 
     if (changed || sticks || _sticksShown) [self refresh];   // also refresh on the stick release so the knob returns to the centre
     _sticksShown = sticks;
 }
-// Touches no control takes (all of them while a physical controller is connected) go to the game's touch screen, normalized on the 16:9 picture that front_ios.m
-// centres in the screen: Super Mario Galaxy's pointer in handheld mode (profile op_mode). The host reports them only in handheld mode, as on the Switch (hle_hid.c touch_read)
+// Touches no control takes (all of them while a physical controller is connected) go to the game's touch screen, normalized on the
+// whole picture: the game view covers the screen (front_ios.m) and the game renders at the screen's aspect ratio (front_game_res),
+// so the picture is the whole view -- a 16:9 rectangle inside it would misplace them. Super Mario Galaxy's pointer in handheld
+// mode (profile op_mode). The host reports them only in handheld mode, as on the Switch (hle_hid.c touch_read)
 - (void)pushGame {
     CGRect b = self.bounds; CGFloat w = b.size.width, h = b.size.height;
     if (w <= 0 || h <= 0) return;
-    if (w / h > 16.0 / 9.0) w = h * 16.0 / 9.0; else h = w * 9.0 / 16.0;
-    CGFloat x0 = (b.size.width - w) / 2, y0 = (b.size.height - h) / 2;
     dm_touch t[16]; int n = 0;
     for (int i = 0; i < 16; i++) if (_game[i]) {
         CGPoint p = [_game[i] locationInView:self];
-        t[n++] = (dm_touch){(uint32_t)i, (float)fmin(fmax((p.x - x0) / w, 0), 0.999), (float)fmin(fmax((p.y - y0) / h, 0), 0.999)};
+        t[n++] = (dm_touch){(uint32_t)i, (float)fmin(fmax(p.x / w, 0), 0.999), (float)fmin(fmax(p.y / h, 0), 0.999)};
     }
     dm_touch_set(t, n);
 }
