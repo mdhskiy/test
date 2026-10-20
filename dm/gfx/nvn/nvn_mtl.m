@@ -1517,6 +1517,7 @@ int mtl_tex_gpu_owned(uint64_t serial) {
 void mtl_tex_cpu_written(const tex_t *t) {
     uint64_t serial = t->serial;
     if (!serial) return;
+    if (lsh_find(serial)) { lsh_sync(lsh_find(serial)); return; }   // a linear texture on a padded shared copy: refresh it from guest memory (the CPU wrote it) instead of switching it to the packaged upload path, whose block-linear layout does not apply
     pthread_mutex_lock(&g_cpu_tex_mu);
     if (!g_cpu_tex) g_cpu_tex = CFSetCreateMutable(NULL, 0, NULL);
     int added = 0;
