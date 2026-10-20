@@ -1487,9 +1487,9 @@ static id<MTLTexture> tex_linear_shadow(const tex_t *t) {
     NSUInteger al = [g_dev minimumLinearTextureAlignmentForPixelFormat:(MTLPixelFormat)pf];
     if (mo % al == 0 && row % al == 0) return nil;   // tex_linear takes this one
     size_t nrow = ((row + al - 1) / al) * al, need = nrow * h;
-    if (!need || need > (1u << 20)) { RED_ONCE(66, "线性贴图 %ux%u 行距 %zu 未对齐且过大（%zu 字节），仍按私有贴图建", w, h, row, need); return nil; }
+    if (!need || need > (1u << 20)) { RED_ONCE(97, "线性贴图 %ux%u 行距 %zu 未对齐且过大（%zu 字节），仍按私有贴图建", w, h, row, need); return nil; }
     lshadow_t *s = NULL; for (int i = 0; i < 64 && !s; i++) if (!g_lsh[i].used) s = &g_lsh[i];
-    if (!s) { RED_ONCE(67, "线性贴图共享副本表已满（64 张），%ux%u 行距 %zu 仍按私有贴图建", w, h, row); return nil; }
+    if (!s) { RED_ONCE(98, "线性贴图共享副本表已满（64 张），%ux%u 行距 %zu 仍按私有贴图建", w, h, row); return nil; }
     id<MTLBuffer> b = [g_dev newBufferWithLength:need options:MTLResourceStorageModeShared];
     if (!b) return nil;
     memset(b.contents, 0, need); res_add(b);

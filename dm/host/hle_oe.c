@@ -258,7 +258,7 @@ static void scale3d_tick(void) {
 // entries. So the entries are found by name in the table the registration function fills, and a slot is only written when it (or the u32 it points at) currently holds
 // a size the game could be rendering at; anything else is reported and left alone. DM_D3_RES=<width>x<height> picks the size (the front end's screen pixels by default,
 // front_game_res); DM_D3_RES=0 leaves the game's own values alone.
-static int d3_in(const module_t *m, uintptr_t a, size_t n) { return a >= (uintptr_t)m->base && n <= m->size && a - (uintptr_t)m->base <= m->size; }
+static int d3_in(const module_t *m, uintptr_t a, size_t n) { return a >= (uintptr_t)m->base && n <= m->size && a - (uintptr_t)m->base <= m->size - n; }
 static int d3_cstr(const module_t *m, uintptr_t a, char *out, int cap) {   // a guest C string, only when all of it lies in the image and is printable
     for (int i = 0; i < cap - 1; i++) {
         if (!d3_in(m, a + (uintptr_t)i, 1)) return 0;
