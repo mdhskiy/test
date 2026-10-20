@@ -56,7 +56,10 @@ tex_dirty_upload	on
 # wraps work in conditional blocks like Tears of the Kingdom does. With this off, a timestamp report's counter field carries the
 # time instead of 0 (the real GPU puts the time in the second field), so the game's "counter == counter" comparisons never hold and
 # every conditional clear / draw runs anyway: wasted GPU work (frame drops with many monsters) and clears the game wanted skipped.
-render_cond	on
+# OFF: with conditional rendering evaluated, a light glow quad near a lantern flickered (its query result alternates), which the
+# player saw as a small patch blinking. Without it every conditional clear / draw runs, which costs some GPU in heavy fights, but
+# nothing is skipped on the strength of a query value we may have counted wrong.
+render_cond	off
 
 # ---- App identity ----
 app_name	DIABLO3
