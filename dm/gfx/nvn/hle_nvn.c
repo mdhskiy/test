@@ -455,7 +455,10 @@ NVN(nvnProgramInitialize, NVNboolean, NVNprogram *p, NVNdevice *d) {
 static void pk_drop(const void *p);
 NVN(nvnProgramFinalize, void, NVNprogram *p) { mtl_prog_release((prog_t *)p); ((prog_t *)p)->magic = 0; pk_drop(p); }
 // a program's per-stage keys (side table: guest NVNprogram address → host object; bit i of ok = stage i computed)
-typedef struct { uint8_t key[6][8]; uint8_t ok; } prog_keys_t;
+// ctl[i]: host copy of stage i's control section (nvnProgramSetShaders). The game's copy is only guaranteed valid during that
+// call, and prog_key recomputes the key from it at the first draw, by which time the game may have unmapped it (D3: SIGBUS in
+// keys_hash reading control + 0x704). It also serves DM_NVN_SHDUMP, whose replay layer saves shaders missing from the map.
+typedef struct { uint8_t key[6][8]; uint8_t ok; void *ctl[6]; } prog_keys_t;
 static pthread_mutex_t g_pk_mu = PTHREAD_MUTEX_INITIALIZER; static CFMutableDictionaryRef g_pk;   // a dedicated table (keys not shared with other side tables)
 static prog_keys_t *pk_get(const void *p, int make) {
     pthread_mutex_lock(&g_pk_mu);
@@ -468,7 +471,7 @@ static prog_keys_t *pk_get(const void *p, int make) {
 static void pk_drop(const void *p) {
     pthread_mutex_lock(&g_pk_mu);
     prog_keys_t *k = g_pk ? (prog_keys_t *)CFDictionaryGetValue(g_pk, p) : NULL;
-    if (k) { CFDictionaryRemoveValue(g_pk, p); free(k); }
+    if (k) { for (int i = 0; i < 6; i++) free(k->ctl[i]); CFDictionaryRemoveValue(g_pk, p); free(k); }
     pthread_mutex_unlock(&g_pk_mu);
 }
 // mapped = 1: computed only when the code area is in a registered memory pool (at SetShaders: Mario sets some programs with an unmapped address first and fills it in before the first draw)
@@ -476,14 +479,17 @@ static int keys_hash(const NVNshaderData *sd, int mapped, uint8_t out[8]) {
     uint32_t ncode = 0; void *mb; uint64_t mo;
     if (!sd->control) return 0;
     memcpy(&ncode, (const uint8_t *)sd->control + 0x704, 4);
-    int code = sd->data && ncode && ncode < (1u << 24);
-    if (mapped && !(code && mtl_addr(sd->data, ncode, &mb, &mo))) return 0;
+    int code = sd->data && ncode && ncode < (1u << 24) && mtl_addr(sd->data, ncode, &mb, &mo);
+    if (mapped && !code) return 0;
     // Control +0x20 holds the section's own length: sections of at least 0x880 bytes (all of Mario's, Engage's, Dread's and 13 Sentinels') use the first 0x880; SDK 10's 3D World has 0x850-byte ones followed by other data, so only their own length is used (shader_split.py ctl_len)
     uint32_t nctl = 0x880, own; memcpy(&own, (const uint8_t *)sd->control + 0x20, 4);
     if (own >= 0x760 && own < 0x880) nctl = own;
     uint8_t md[CC_SHA256_DIGEST_LENGTH]; CC_SHA256_CTX hc; CC_SHA256_Init(&hc);
     CC_SHA256_Update(&hc, sd->control, nctl);
-    if (code) CC_SHA256_Update(&hc, (const void *)(uintptr_t)sd->data, ncode);
+    // Through the host address mtl_addr resolved, not through sd->data: that is a guest address, and hashing it directly reads
+    // memory the game may already have unmapped when the key is recomputed at the first draw (D3: SIGBUS). Same bytes either way
+    // (the pool's storage is the memory the game filled), so no key changes.
+    if (code) CC_SHA256_Update(&hc, (const uint8_t *)mb + mo, ncode);
     CC_SHA256_Final(md, &hc); memcpy(out, md, 8);
     return 1;
 }
@@ -502,17 +508,21 @@ NVN(nvnProgramSetShaders, NVNboolean, NVNprogram *p, int n, const NVNshaderData 
     if (n < 0 || n > 6) { LOG("【红】ProgramSetShaders 阶段数 %d", n); return 0; }
     mtl_prog_release(o); o->nstage = n; memcpy(o->sd, sd, n * sizeof *sd); o->serial = nvn_new_serial();
     // The keys are computed here (see prog_key in nvn_obj.h): the control section is only guaranteed valid during this call; the code area lives in a memory pool and stays valid while the program is in use
-    static int dump = -1; if (dump < 0) dump = getenv("DM_NVN_SHDUMP") != NULL;
     prog_keys_t *k = pk_get(p, 1);
     k->ok = 0;
     for (int i = 0; i < n; i++) {
-        int have = keys_hash(&sd[i], 1, k->key[i]);
+        // Copy the control section into host memory before anything reads it: it is only guaranteed valid during this call, and
+        // prog_key recomputes the key from it at the first draw (when the code area was not mapped yet), by which time the game may
+        // have unmapped it -- D3 crashed there with SIGBUS in keys_hash. The copy kept for this stage by an earlier SetShaders is
+        // freed here, so repeated calls on one program do not accumulate. Only the section's own length is copied (control +0x20,
+        // bounded by 0x880 as in keys_hash); the rest of the copy stays zero, as it does for the shorter SDK 10 sections.
+        if (sd[i].control) {
+            uint32_t own = 0; memcpy(&own, (const uint8_t *)sd[i].control + 0x20, 4);
+            void *c = calloc(1, 0x880); memcpy(c, sd[i].control, own >= 0x760 && own < 0x880 ? own : 0x880);
+            free(k->ctl[i]); k->ctl[i] = c; o->sd[i].control = c;
+        } else { free(k->ctl[i]); k->ctl[i] = NULL; }
+        int have = keys_hash(&o->sd[i], 1, k->key[i]);   // from the copy: the control section is host memory from here on
         if (have) k->ok |= (uint8_t)(1u << i);
-        // The control section is only guaranteed valid during this call; when the key could not be computed now (the code area is not
-        // mapped yet, the game fills it in before the first draw) prog_key recomputes it later, so keep a copy of the control section --
-        // otherwise that later hash reads memory the game has already reused (D3: SIGSEGV with the fault address inside a string).
-        // DM_NVN_SHDUMP keeps the copy for every program so the replay layer can save shaders missing from the map (never freed).
-        if (sd[i].control && (!have || dump)) { void *c = malloc(0x880); memcpy(c, sd[i].control, 0x880); o->sd[i].control = c; }
     }
     OLOG("ProgramSetShaders %p n=%d data0=%#llx", (void *)p, n, n ? (unsigned long long)sd[0].data : 0ull);
     return 1;
