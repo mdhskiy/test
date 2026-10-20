@@ -1,88 +1,176 @@
 # 出「壳」：macOS runner 上构建不含任何游戏内容的 iOS 安装包（源码里没有游戏数据 / NSP / prod.keys）。
+
 # 产物（artifact）：DmIOS-shell-build-input.zip + shell_manifest.txt + shell_info.txt + build.log（失败也上传，便于定位）。
+
 # 用法：Actions → Build shell → Run workflow（可选：填 GAME，缺省用仓库里的 D3 档案）。
+
 # 拿到产物后，在 Windows 上：python scripts/d3rm_pack.py --shell <下载的 zip> --game <游戏目录> --out <输出.ipa>
+
 name: Build shell
+
 on:
+
   workflow_dispatch:
+
     inputs:
+
       game:
+
         description: "game profile (base game title ID)"
+
         required: false
+
         default: "01001B300B9BE000"
+
   push:
+
     paths: ['dm/**', 'scripts/d3rm_pack.py', '.github/workflows/build-shell.yml']
 
+
+
 jobs:
+
   canary:                      # 探针：Ubuntu 池若秒分配、macOS 仍排队，就是 macOS 池或账号层面的限制，不是仓库配置
+
     runs-on: ubuntu-latest
+
     steps:
+
       - run: echo "ubuntu runner ok"
+
   shell:
+
     # 两个镜像同时排：macOS 池紧时哪个先分到机器就用哪个（两边都装了 Xcode 26，下面的步骤选最新那个）
+
     # Both images queue at once: whichever gets a runner first wins (both carry Xcode 26; the step below selects the newest)
+
     strategy:
+
       fail-fast: false
+
       matrix:
-        os: [macos-26, macos-15]
+
+        os: [macos-15]
+
     runs-on: ${{ matrix.os }}
+
     env:
+
       GAME: ${{ github.event.inputs.game || '01001B300B9BE000' }}
+
       DM_ROOT: ${{ github.workspace }}/dm-work
+
       HOMEBREW_NO_AUTO_UPDATE: "1"
+
       HOMEBREW_NO_INSTALL_CLEANUP: "1"
+
     steps:
+
       - uses: actions/checkout@v4
+
       - name: newest Xcode (the project needs the iOS 26 SDK)
+
         run: |
+
           set -x
+
           xcodebuild -version || true
+
           XC=$(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V | tail -1)
+
           if [ -n "$XC" ]; then sudo xcode-select -s "$XC"; fi
+
           xcodebuild -version
+
           xcrun --sdk iphoneos --show-sdk-version
+
       - name: tools (xcodegen, fontTools)
+
         run: |
+
           set -x
+
           echo "--- runner ---"; sw_vers; xcodebuild -version; brew --version | head -1; python3 --version; command -v python3
+
           # xcodegen：preinstalled brew；偶发 tap 失败重试一次
+
           brew list xcodegen > /dev/null 2>&1 || brew install xcodegen || { sleep 5; brew install xcodegen; }
+
           xcodegen --version
+
           # fontTools 跑在 venv 里：macOS runner 的 python3 是 externally-managed，直接 pip install 会被 PEP 668 拒绝；
+
           # venv 的 python 经 FONT_PY 交给 shell_build.sh（make_ext_font.py 用它）
+
           python3 -m venv "$RUNNER_TEMP/fontvenv"
+
           "$RUNNER_TEMP/fontvenv/bin/pip" install --quiet --upgrade pip
+
           "$RUNNER_TEMP/fontvenv/bin/pip" install --quiet fonttools
+
           "$RUNNER_TEMP/fontvenv/bin/python" -c "import fontTools; print('fontTools', fontTools.version)"
+
           echo "FONT_PY=$RUNNER_TEMP/fontvenv/bin/python" >> "$GITHUB_ENV"
+
           echo "STD_FONT=/System/Library/Fonts/Supplemental/Arial Unicode.ttf" >> "$GITHUB_ENV"
+
       - name: build the shell
+
         id: build
+
         run: |
+
           mkdir -p "$DM_ROOT/build/shell"
+
           bash dm/ios/tools/shell_build.sh 2>&1 | tee "$DM_ROOT/build/shell/script.log"
+
       - name: failure diagnostics (into the run summary)
+
         if: failure()
+
         run: |
+
           {
+
             echo '## script.log tail'; echo '```'
+
             tail -40 dm-work/build/shell/script.log 2>/dev/null || echo '(none)'
+
             echo '```'
+
             echo '## build.log tail'; echo '```'
+
             tail -40 dm-work/build/shell/build.log 2>/dev/null || echo '(none)'
+
             echo '```'
+
           } >> "$GITHUB_STEP_SUMMARY"
+
       - name: artifact
+
         if: always()
+
         uses: actions/upload-artifact@v4
+
         with:
+
           name: DmIOS-shell-${{ matrix.os }}
+
           path: |
+
             dm-work/build/shell/DmIOS-shell-build-input.zip
+
             dm-work/build/shell/shell_manifest.txt
+
             dm-work/build/shell/shell_info.txt
+
             dm-work/build/shell/build.log
+
             dm-work/build/shell/shell_files.tsv
+
             dm-work/build/shell/script.log
+
           retention-days: 30
+
           if-no-files-found: warn
+
