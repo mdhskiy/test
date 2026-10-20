@@ -479,17 +479,18 @@ static int keys_hash(const NVNshaderData *sd, int mapped, uint8_t out[8]) {
     uint32_t ncode = 0; void *mb; uint64_t mo;
     if (!sd->control) return 0;
     memcpy(&ncode, (const uint8_t *)sd->control + 0x704, 4);
-    int code = sd->data && ncode && ncode < (1u << 24) && mtl_addr(sd->data, ncode, &mb, &mo);
-    if (mapped && !code) return 0;
+    int code = sd->data && ncode && ncode < (1u << 24);
+    if (mapped && !(code && mtl_addr(sd->data, ncode, &mb, &mo))) return 0;   // mtl_addr only checks that the code area lies in a registered pool; it is not how the bytes are reached (see below)
     // Control +0x20 holds the section's own length: sections of at least 0x880 bytes (all of Mario's, Engage's, Dread's and 13 Sentinels') use the first 0x880; SDK 10's 3D World has 0x850-byte ones followed by other data, so only their own length is used (shader_split.py ctl_len)
     uint32_t nctl = 0x880, own; memcpy(&own, (const uint8_t *)sd->control + 0x20, 4);
     if (own >= 0x760 && own < 0x880) nctl = own;
     uint8_t md[CC_SHA256_DIGEST_LENGTH]; CC_SHA256_CTX hc; CC_SHA256_Init(&hc);
     CC_SHA256_Update(&hc, sd->control, nctl);
-    // Through the host address mtl_addr resolved, not through sd->data: that is a guest address, and hashing it directly reads
-    // memory the game may already have unmapped when the key is recomputed at the first draw (D3: SIGBUS). Same bytes either way
-    // (the pool's storage is the memory the game filled), so no key changes.
-    if (code) CC_SHA256_Update(&hc, (const uint8_t *)mb + mo, ncode);
+    // Hashed through the guest address itself: the pool's storage is mapped in the host address space at that address, so it is
+    // the bytes the game filled, and it is what the shader map was keyed with. Do NOT go through mtl_addr's buffer for this --
+    // it hands back the id<MTLBuffer> object pointer, not the storage address (hashing that gave every D3 shader a wrong key,
+    // none of them were found in the map, and the picture went black).
+    if (code) CC_SHA256_Update(&hc, (const void *)(uintptr_t)sd->data, ncode);
     CC_SHA256_Final(md, &hc); memcpy(out, md, 8);
     return 1;
 }
