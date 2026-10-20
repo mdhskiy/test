@@ -319,7 +319,9 @@ int nvn_ft_written(const tex_t *t) {
 // Each poll looks at no more than FT_POLL_BYTES of registered textures, going on where the last one stopped; any guest write starts another pass over the whole list.
 // Checking every texture at every submission cost TOTK 0.4 ms of submit CPU per frame on the Mac; this way a texture is picked up a few submissions later at most
 enum { FT_POLL_BYTES = 128 << 20 };
+void mtl_lsh_sync_all(void) __attribute__((weak));   // nvn_mtl.m: refresh every padded linear-texture copy from guest memory
 void nvn_ft_poll(void) {
+    if (mtl_lsh_sync_all) mtl_lsh_sync_all();
     if (!DM_GAME_TEX_DIRTY_UPLOAD) return;
     static uint64_t gen; static size_t cur, left;
     static tex_t *hit; static size_t chit; size_t nhit = 0;
@@ -458,20 +460,26 @@ NVN(nvnProgramFinalize, void, NVNprogram *p) { mtl_prog_release((prog_t *)p); ((
 // ctl[i]: host copy of stage i's control section (nvnProgramSetShaders). The game's copy is only guaranteed valid during that
 // call, and prog_key recomputes the key from it at the first draw, by which time the game may have unmapped it (D3: SIGBUS in
 // keys_hash reading control + 0x704). It also serves DM_NVN_SHDUMP, whose replay layer saves shaders missing from the map.
-typedef struct { uint8_t key[6][8]; uint8_t ok; void *ctl[6]; } prog_keys_t;
+#define PK_MAGIC 0x504B5953u   // 'PKYS': a stale / reused side-table entry must be recognisable before its ctl pointers are touched
+#define CTL_MAGIC 0x434C5431u  // 'CLT1': host copy of a control section (16-byte header, data after it) -- freed copies are marked by clearing it
+typedef struct { uint32_t magic; uint8_t key[6][8]; uint8_t ok; void *ctl[6]; } prog_keys_t;
+static void *ctl_new(void) { uint8_t *c = calloc(1, 0x880 + 16); if (c) *(uint32_t *)c = CTL_MAGIC; return c; }
+static uint8_t *ctl_data(void *c) { return c && *(const uint32_t *)c == CTL_MAGIC ? (uint8_t *)c + 16 : NULL; }
+static void ctl_free(void *c) { if (c) { *(uint32_t *)c = 0; free(c); } }
 static pthread_mutex_t g_pk_mu = PTHREAD_MUTEX_INITIALIZER; static CFMutableDictionaryRef g_pk;   // a dedicated table (keys not shared with other side tables)
 static prog_keys_t *pk_get(const void *p, int make) {
     pthread_mutex_lock(&g_pk_mu);
     if (!g_pk) g_pk = CFDictionaryCreateMutable(NULL, 0, NULL, NULL);
     prog_keys_t *k = (prog_keys_t *)CFDictionaryGetValue(g_pk, p);
-    if (!k && make) { k = calloc(1, sizeof *k); CFDictionarySetValue(g_pk, p, k); }
+    if (!k && make) { k = calloc(1, sizeof *k); k->magic = PK_MAGIC; CFDictionarySetValue(g_pk, p, k); }
+    else if (k && k->magic != PK_MAGIC) { for (int i = 0; i < 6; i++) k->ctl[i] = NULL; memset(k->key, 0, sizeof k->key); k->ok = 0; k->magic = PK_MAGIC; }
     pthread_mutex_unlock(&g_pk_mu);
     return k;
 }
 static void pk_drop(const void *p) {
     pthread_mutex_lock(&g_pk_mu);
     prog_keys_t *k = g_pk ? (prog_keys_t *)CFDictionaryGetValue(g_pk, p) : NULL;
-    if (k) { for (int i = 0; i < 6; i++) free(k->ctl[i]); CFDictionaryRemoveValue(g_pk, p); free(k); }
+    if (k) { for (int i = 0; i < 6; i++) ctl_free(k->ctl[i]); k->magic = 0; CFDictionaryRemoveValue(g_pk, p); free(k); }
     pthread_mutex_unlock(&g_pk_mu);
 }
 // mapped = 1: computed only when the code area is in a registered memory pool (at SetShaders: Mario sets some programs with an unmapped address first and fills it in before the first draw)
@@ -501,8 +509,9 @@ int prog_key(const prog_t *p, unsigned st, uint8_t key[8]) {
         // Recompute from the host copy taken at SetShaders, never from p->sd[st].control: that pointer is the game's and may be dead by now (D3 still hit SIGBUS in
         // keys_hash with a garbage control pointer even after the copy existed -- the object can be reused, and the stale pointer came back). k->ctl[st] is memory we
         // allocated, so dereferencing it is always safe; when the stage has no control section there is no key at all and the caller skips the stage.
-        if (!k->ctl[st]) return 0;
-        NVNshaderData sd = p->sd[st]; sd.control = k->ctl[st];
+        uint8_t *cd = ctl_data(k->ctl[st]);
+        if (!cd) return 0;                       // no copy, or the copy was freed: no key rather than a wild read (D3 crashed here three times)
+        NVNshaderData sd = p->sd[st]; sd.control = cd;
         if (!keys_hash(&sd, 1, k->key[st])) memset(k->key[st], 0, 8);
         k->ok |= (uint8_t)(1u << st);
     }
@@ -524,9 +533,10 @@ NVN(nvnProgramSetShaders, NVNboolean, NVNprogram *p, int n, const NVNshaderData 
         // bounded by 0x880 as in keys_hash); the rest of the copy stays zero, as it does for the shorter SDK 10 sections.
         if (sd[i].control) {
             uint32_t own = 0; memcpy(&own, (const uint8_t *)sd[i].control + 0x20, 4);
-            void *c = calloc(1, 0x880); memcpy(c, sd[i].control, own >= 0x760 && own < 0x880 ? own : 0x880);
-            free(k->ctl[i]); k->ctl[i] = c; o->sd[i].control = c;
-        } else { free(k->ctl[i]); k->ctl[i] = NULL; }
+            void *c = ctl_new();
+            if (c) memcpy((uint8_t *)c + 16, sd[i].control, own >= 0x760 && own < 0x880 ? own : 0x880);
+            ctl_free(k->ctl[i]); k->ctl[i] = c; o->sd[i].control = ctl_data(c);
+        } else { ctl_free(k->ctl[i]); k->ctl[i] = NULL; }
         int have = keys_hash(&o->sd[i], 1, k->key[i]);   // from the copy: the control section is host memory from here on
         if (have) k->ok |= (uint8_t)(1u << i);
     }

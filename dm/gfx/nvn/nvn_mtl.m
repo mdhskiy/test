@@ -1480,6 +1480,7 @@ static int lsh_sync(lshadow_t *s) {   // push the rows the CPU changed since the
     return changed;
 }
 static void lsh_sync_serial(uint64_t serial) { lshadow_t *s = lsh_find(serial); if (s) lsh_sync(s); }
+void mtl_lsh_sync_all(void) { for (int i = 0; i < 64; i++) if (g_lsh[i].used) lsh_sync(&g_lsh[i]); }   // once per submission (nvn_ft_poll): these LUTs are rewritten by the CPU every frame
 static id<MTLTexture> tex_linear_shadow(const tex_t *t) {
     if (!(t->d.flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET)) || !t->mem || !t->pool || (t->pool->flags & NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS)) return nil;
     if (t->d.target != NVN_TEXTURE_TARGET_2D || t->d.levels > 1 || t->d.samples > 1) return nil;
