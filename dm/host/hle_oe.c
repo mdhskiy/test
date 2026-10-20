@@ -253,12 +253,39 @@ static void scale3d_tick(void) {
 // registration function at main+0x27c1a0 is called nine times with x2 = main+0x181ab18 plus an offset (main+0x181ac80 for the
 // group holding DisplayModeWidth / DisplayModeHeight, registered at main+0x27c9ec and main+0x27d084, beside Gamma and
 // ShadowQuality). All of it is in bss, so the values only exist at run time.
-// The pair is found by looking for the size the game is rendering at right now (the window crop, which it sets every frame) inside
-// that region, so a build in which the address moved is not written at random. Writing it moves the whole range, ratio included.
-// DM_D3_RES=<width>x<height> picks the size (the front end's screen pixels by default, front_game_res); DM_D3_RES=0 leaves the
-// game's own values alone.
+// Where the value sits inside an entry is not obvious: each entry is 0x28 bytes (a name pointer plus a value that may be inline, 64-bit, or behind a pointer), and the
+// first attempt -- looking for two adjacent u32s equal to the size being rendered -- never matched, because DisplayModeWidth and DisplayModeHeight are two separate
+// entries. So the entries are found by name in the table the registration function fills, and a slot is only written when it (or the u32 it points at) currently holds
+// a size the game could be rendering at; anything else is reported and left alone. DM_D3_RES=<width>x<height> picks the size (the front end's screen pixels by default,
+// front_game_res); DM_D3_RES=0 leaves the game's own values alone.
+static int d3_in(const module_t *m, uintptr_t a, size_t n) { return a >= (uintptr_t)m->base && n <= m->size && a - (uintptr_t)m->base <= m->size; }
+static int d3_cstr(const module_t *m, uintptr_t a, char *out, int cap) {   // a guest C string, only when all of it lies in the image and is printable
+    for (int i = 0; i < cap - 1; i++) {
+        if (!d3_in(m, a + (uintptr_t)i, 1)) return 0;
+        int c = ((const uint8_t *)a)[i];
+        if (!c) { out[i] = 0; return 1; }
+        if (c < 0x20 || c > 0x7e) return 0;
+        out[i] = (char)c;
+    }
+    out[cap - 1] = 0; return 1;
+}
+// The value slot of one entry: inline at e+8*j (32- or 64-bit), or the u32 a pointer slot points at. Accepted only when it holds "want" or one of the known sizes,
+// which is what makes writing it safe -- a slot holding anything else is never touched.
+static uint32_t *d3_slot(const module_t *m, uintptr_t e, uint32_t want, const uint32_t *known, int nk) {
+    uint64_t q[5]; memcpy(q, (const void *)e, sizeof q);
+    for (int j = 1; j < 5; j++) {
+        if (q[j] == want) return (uint32_t *)(e + 8 * j);
+        if (q[j] < 0x100000) { for (int k = 0; k < nk; k++) if (q[j] == known[k]) return (uint32_t *)(e + 8 * j); }
+        if (d3_in(m, (uintptr_t)q[j], 4)) {
+            uint32_t v = *(const uint32_t *)(uintptr_t)q[j];
+            if (v == want) return (uint32_t *)(uintptr_t)q[j];
+            for (int k = 0; k < nk; k++) if (v == known[k]) return (uint32_t *)(uintptr_t)q[j];
+        }
+    }
+    return NULL;
+}
 void dm_d3_res_tick(uint32_t w, uint32_t h) {
-    static int init; static module_t *main; static uint32_t *pair, want_w, want_h; static int logged;
+    static int init; static module_t *main; static uint32_t *pw, *ph, want_w, want_h; static int logged, probes;
     if (!init) {
         init = 1;
         const char *e = getenv("DM_D3_RES");
@@ -271,19 +298,39 @@ void dm_d3_res_tick(uint32_t w, uint32_t h) {
             LOG("D3 显示尺寸：main 构建 %s 不是 D3 v1441792，不改（地址只对这一版有效）", main && main->build_id[0] ? main->build_id : "（产物无构建号）"); main = NULL; }
     }
     if (!main) return;
-    if (!pair) {
-        uint32_t *lo = (uint32_t *)(main->base + 0x181ab00), *hi = (uint32_t *)(main->base + 0x181c000);
-        for (uint32_t *q = lo; q + 1 < hi; q++) if (*q == w && q[1] == h) { pair = q; break; }   // the size being rendered at
-        if (!pair) {   // not found: the game may be holding the top of the range while rendering a scaled-down frame
-            static const uint32_t known[][2] = {{1600, 900}, {1280, 720}, {1920, 1080}, {1344, 756}, {960, 540}};
-            for (int k = 0; k < 5 && !pair; k++) for (uint32_t *q = lo; q + 1 < hi; q++) if (*q == known[k][0] && q[1] == known[k][1]) { pair = q; break; }
+    static const uint32_t known[][2] = {{1920, 1080}, {1600, 900}, {1280, 720}, {1344, 756}, {960, 540}};
+    static uint32_t kl[10]; static int nk;
+    if (!nk) for (int k = 0; k < 5; k++) { kl[nk++] = known[k][0]; kl[nk++] = known[k][1]; }
+    if (!pw) {   // look for the two entries by name (the table is walked at most every 30 calls: the game calls this every frame)
+        if (probes++ % 30) return;
+        uintptr_t T = *(uintptr_t *)(main->base + 0x11505e0);
+        if (!d3_in(main, T, 0x28)) { if (!logged++) LOG("D3 显示尺寸：设置表指针 main+0x11505e0 = %#llx 不在 main 里，不改", (unsigned long long)T); return; }
+        uintptr_t ew = 0, eh = 0; int nent = 0;
+        for (int i = 0; i < 1024; i++) {
+            uintptr_t e = T + (uintptr_t)i * 0x28;
+            if (!d3_in(main, e, 0x28)) break;
+            nent = i + 1;
+            uint64_t q[5]; memcpy(q, (const void *)e, sizeof q);
+            char nm[40]; int ok = 0;
+            for (int j = 0; j < 5 && !ok; j++) if (d3_in(main, (uintptr_t)q[j], 2)) ok = d3_cstr(main, (uintptr_t)q[j], nm, sizeof nm);
+            if (!ok) continue;
+            if (!strncmp(nm, "Display", 7))
+                LOG("D3 设置项 #%d main+%#tx %s = %#llx %#llx %#llx %#llx %#llx", i, (ptrdiff_t)(e - (uintptr_t)main->base), nm,
+                    (unsigned long long)q[0], (unsigned long long)q[1], (unsigned long long)q[2], (unsigned long long)q[3], (unsigned long long)q[4]);
+            if (!strcmp(nm, "DisplayModeWidth")) ew = e;
+            if (!strcmp(nm, "DisplayModeHeight")) eh = e;
         }
-        if (!pair) { if (!logged++) LOG("D3 显示尺寸：设置区里没找到 %ux%u 也没找到已知档位，不改（游戏画面 %ux%u）", w, h, w, h); return; }
-        LOG("D3 显示尺寸：设置区 main+%#tx 处是 %ux%u → 改成 %ux%u（DM_D3_RES 可改 / 0 关闭）",
-            (ptrdiff_t)((uint8_t *)pair - main->base), pair[0], pair[1], want_w, want_h);
+        if (ew && eh) {
+            uint32_t *a = d3_slot(main, ew, w, kl, nk), *b = d3_slot(main, eh, h, kl, nk);
+            if (a && b) { pw = a; ph = b;
+                LOG("D3 显示尺寸：宽 main+%#tx（现 %u）/ 高 main+%#tx（现 %u）→ 改成 %ux%u（DM_D3_RES 可改 / 0 关闭）",
+                    (ptrdiff_t)((uint8_t *)a - main->base), *a, (ptrdiff_t)((uint8_t *)b - main->base), *b, want_w, want_h); }
+            else if (!logged++) LOG("D3 显示尺寸：找到 DisplayModeWidth/Height 条目（.bss 里 %d 项），但没有槽位等于当前 %ux%u，不改", nent, w, h);
+        } else if (!logged++) LOG("D3 显示尺寸：设置表 %d 项里没有 DisplayModeWidth/Height（宽=%d 高=%d），不改", nent, !!ew, !!eh);
+        if (!pw) return;
     }
-    if (pair[0] == want_w && pair[1] == want_h) return;   // the game keeps the value: nothing to do
-    dm_guest_write_prepare(pair, 8); pair[0] = want_w; pair[1] = want_h;
+    if (pw[0] == want_w && ph[0] == want_h) return;   // the game keeps the value: nothing to do
+    dm_guest_write_prepare(pw, 4); dm_guest_write_prepare(ph, 4); pw[0] = want_w; ph[0] = want_h;
 }
 HLE_FORCE("_ZN2nn2oe25TryPopNotificationMessageEPj", "系统通知队列；前端状态变化入队", unsigned, h_oe_TryPopMsg, uint32_t *msg) {
     scale3d_tick();

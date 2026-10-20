@@ -497,10 +497,15 @@ static int keys_hash(const NVNshaderData *sd, int mapped, uint8_t out[8]) {
 int prog_key(const prog_t *p, unsigned st, uint8_t key[8]) {
     if (st >= p->nstage) return 0;
     prog_keys_t *k = pk_get(p, 1);
-    // mapped=1: the key is recomputed at the first draw with pointers saved at SetShaders time; requiring the code area to lie in a
-// registered pool keeps a stale / reused control pointer (D3 crashed here: SIGSEGV in keys_hash, the address was ASCII text) from
-// being hashed with a garbage length read out of that dead memory. When it is not mapped yet, the key stays unset as before.
-    if (!(k->ok >> st & 1)) { keys_hash(&p->sd[st], 1, k->key[st]); k->ok |= (uint8_t)(1u << st); }
+    if (!(k->ok >> st & 1)) {
+        // Recompute from the host copy taken at SetShaders, never from p->sd[st].control: that pointer is the game's and may be dead by now (D3 still hit SIGBUS in
+        // keys_hash with a garbage control pointer even after the copy existed -- the object can be reused, and the stale pointer came back). k->ctl[st] is memory we
+        // allocated, so dereferencing it is always safe; when the stage has no control section there is no key at all and the caller skips the stage.
+        if (!k->ctl[st]) return 0;
+        NVNshaderData sd = p->sd[st]; sd.control = k->ctl[st];
+        if (!keys_hash(&sd, 1, k->key[st])) memset(k->key[st], 0, 8);
+        k->ok |= (uint8_t)(1u << st);
+    }
     memcpy(key, k->key[st], 8);
     return 1;
 }

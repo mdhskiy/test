@@ -1457,6 +1457,54 @@ static id<MTLTexture> tex_linear(const tex_t *t) {
     d.usage = MTLTextureUsageShaderRead | (t->d.flags & NVN_TEXTURE_FLAGS_IMAGE ? MTLTextureUsageShaderWrite : 0) | (t->d.flags & NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET ? MTLTextureUsageRenderTarget : 0);
     return [b newTextureWithDescriptor:d offset:mo bytesPerRow:row];
 }
+// A linear texture whose offset or row stride is not a multiple of minimumLinearTextureAlignmentForPixelFormat cannot be made on the pool buffer, and the generic path
+// then builds a GPU-private texture that never sees the CPU's writes -- D3 rewrites a light LUT (row stride 32) from the CPU and the lights flicker. Keep a padded
+// shared copy instead: rows go into a buffer with an aligned stride and the texture reads that; the guest rows are copied again before each use, so the CPU's writes show.
+typedef struct { uint64_t serial; void *buf; void *tex; const uint8_t *src; uint32_t row, nrow, h; int used; } lshadow_t;
+static lshadow_t g_lsh[64];
+static lshadow_t *lsh_find(uint64_t serial) {
+    for (int i = 0; i < 64; i++) if (g_lsh[i].used && g_lsh[i].serial == serial) return &g_lsh[i];
+    return NULL;
+}
+static void lsh_sync(lshadow_t *s) {   // copy only the rows that changed (a few KB per frame at most)
+    if (!s || !s->used || !s->src || !s->buf) return;
+    uint8_t *w = (uint8_t *)((__bridge id<MTLBuffer>)s->buf).contents;
+    for (uint32_t y = 0; y < s->h; y++) {
+        const uint8_t *p = s->src + (size_t)y * s->row; uint8_t *q = w + (size_t)y * s->nrow;
+        if (memcmp(p, q, s->row)) memcpy(q, p, s->row);
+    }
+}
+static void lsh_sync_serial(uint64_t serial) { lshadow_t *s = lsh_find(serial); if (s) lsh_sync(s); }
+static id<MTLTexture> tex_linear_shadow(const tex_t *t) {
+    if (!(t->d.flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET)) || !t->mem || !t->pool || (t->pool->flags & NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS)) return nil;
+    if (t->d.target != NVN_TEXTURE_TARGET_2D || t->d.levels > 1 || t->d.samples > 1) return nil;
+    uint32_t pf = 0; uint8_t swz[4]; int bw, bh, bpb = nvn_fmt_bpb(t->d.format, &bw, &bh);
+    if (!nvn_fmt_to_mtl(t->d.format, &pf, swz) || !pf || !bpb || bw != 1 || bh != 1) return nil;
+    uint32_t w = t->d.width ? t->d.width : 1, h = t->d.height ? t->d.height : 1;
+    size_t row = t->d.stride ? t->d.stride : (size_t)w * bpb;
+    void *mb; uint64_t mo;
+    if (!mtl_addr((uint64_t)t->mem, (uint64_t)row * h, &mb, &mo)) return nil;
+    NSUInteger al = [g_dev minimumLinearTextureAlignmentForPixelFormat:(MTLPixelFormat)pf];
+    if (mo % al == 0 && row % al == 0) return nil;   // tex_linear takes this one
+    size_t nrow = ((row + al - 1) / al) * al, need = nrow * h;
+    if (!need || need > (1u << 20)) { RED_ONCE(66, "线性贴图 %ux%u 行距 %zu 未对齐且过大（%zu 字节），仍按私有贴图建", w, h, row, need); return nil; }
+    lshadow_t *s = NULL; for (int i = 0; i < 64 && !s; i++) if (!g_lsh[i].used) s = &g_lsh[i];
+    if (!s) { RED_ONCE(67, "线性贴图共享副本表已满（64 张），%ux%u 行距 %zu 仍按私有贴图建", w, h, row); return nil; }
+    id<MTLBuffer> b = [g_dev newBufferWithLength:need options:MTLResourceStorageModeShared];
+    if (!b) return nil;
+    memset(b.contents, 0, need); res_add(b);
+    MTLTextureDescriptor *dd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:(MTLPixelFormat)pf width:w height:h mipmapped:NO];
+    dd.resourceOptions = MTLResourceStorageModeShared;
+    dd.usage = MTLTextureUsageShaderRead | (t->d.flags & NVN_TEXTURE_FLAGS_IMAGE ? MTLTextureUsageShaderWrite : 0) | (t->d.flags & NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET ? MTLTextureUsageRenderTarget : 0);
+    id<MTLTexture> tx = [b newTextureWithDescriptor:dd offset:0 bytesPerRow:nrow];
+    if (!tx) return nil;
+    s->serial = t->serial; s->buf = (void *)CFBridgingRetain(b); s->tex = (void *)CFBridgingRetain(tx);
+    s->src = (const uint8_t *)t->mem; s->row = (uint32_t)row; s->nrow = (uint32_t)nrow; s->h = h; s->used = 1;
+    lsh_sync(s);
+    MLOG("线性贴图 %ux%u 格式 %#x：偏移 %#llx / 行距 %zu 不满足 %lu 字节对齐 → 建行距 %zu 的共享副本，用时从客体内存同步（CPU 写入可见）",
+         w, h, t->d.format, (unsigned long long)mo, row, (unsigned long)al, nrow);
+    return tx;
+}
 // CPU-written block-linear textures (WriteTexels): the game gave no packaged layout and changes the content from the CPU each frame (Engage's movie frames: a Y plane R8 + a UV plane RG8, WriteTexels every frame).
 // Only packaged textures used to be uploaded from guest memory, so such a texture became a GPU-only texture whose content stayed 0. Their serials are recorded and they resolve through the packaged path (upload + re-upload on dirty pages)
 static pthread_mutex_t g_cpu_tex_mu = PTHREAD_MUTEX_INITIALIZER; static CFMutableSetRef g_cpu_tex;
@@ -1490,6 +1538,7 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct) {
     tex_t *t = (tex_t *)ct;
     if (!t || !t->serial) return nil;
     if (t->magic != MAGIC('T', 'E', 'X', 0)) { RED_ONCE(70, "贴图对象已失效（magic %#x，首例 ser=%llu）：不建 MTLTexture", t->magic, (unsigned long long)t->serial); return nil; }
+    lsh_sync_serial(t->serial);   // linear textures on a padded shared copy: pick up what the CPU wrote since the last use (D3's light LUT)
     int packaged = (t->has_layout || tex_cpu_written(t->serial)) && t->mem;
     {   // Diagnostic DM_NVN_TEXINFO=WxH: log storage and description of textures of that size on first resolution (to tell whether two textures share storage and why they were not merged)
         static int ti = -1; static uint32_t tw, th; static uint64_t last[64]; static int nl;
@@ -1559,6 +1608,7 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct) {
     pthread_mutex_lock(&g_smu); __unsafe_unretained id shared = hm_get_id(&g_alias, &ak); pthread_mutex_unlock(&g_smu);
     if (shared) { tex_put(t->serial, shared); return shared; }
     id<MTLTexture> mt = tex_linear(t);
+    if (!mt) mt = tex_linear_shadow(t);   // unaligned linear texture: a padded shared copy instead of a private texture the CPU cannot write
     if (!mt) {
         MTLTextureDescriptor *d = tex_desc(t, 0);
         if (!d) return nil;
@@ -2502,7 +2552,7 @@ static __unsafe_unretained NvProg *prog_get(const prog_t *cp) {   // Called only
     NvProg *o = [NvProg new];
     for (unsigned i = 0; i < p->nstage; i++) {
         // Key = sha256(first 0x880 bytes of the control section + code area): many of Mario's shaders share a control section but differ in code (dm/gfx/tools/shader_split.py). It was computed at SetShaders (hle_nvn.c): by now the game may have freed the control section
-        uint8_t md[8]; prog_key(p, i, md);
+        uint8_t md[8]; if (!prog_key(p, i, md)) continue;   // no key for this stage (no control section / code area not in a pool): skip it instead of looking up a zero key
         NSString *k = [NSString stringWithFormat:@"%02x%02x%02x%02x%02x%02x%02x%02x", md[0], md[1], md[2], md[3], md[4], md[5], md[6], md[7]];
         NSString *zh = g_shmap[k];
         if (!zh) {   // Not in the package: look up the compute kernels embedded in the main body (nvn_builtin.h)
