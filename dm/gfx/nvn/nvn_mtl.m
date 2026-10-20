@@ -1468,6 +1468,8 @@ static lshadow_t *lsh_find(uint64_t serial) {
 }
 static int lsh_sync(lshadow_t *s) {   // push the rows the CPU changed since the last upload (a few KB at most)
     if (!s || !s->used || !s->src || !s->copy || !s->tex) return 0;
+    void *mb; uint64_t mo;   // the pool may have been finalized since: reading its memory then is exactly the random-crash shape, so stop
+    if (!mtl_addr((uint64_t)s->src, (size_t)s->row * s->h, &mb, &mo)) { s->used = 0; s->src = NULL; return 0; }
     int changed = 0;
     for (uint32_t y = 0; y < s->h; y++) {
         const uint8_t *p = s->src + (size_t)y * s->row; uint8_t *q = s->copy + (size_t)y * s->row;
