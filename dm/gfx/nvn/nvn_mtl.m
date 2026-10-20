@@ -6883,10 +6883,10 @@ static id<MTLTexture> present_raw_src(id<MTLTexture> src) {
 static double g_present_fill = -1;
 static double present_scale(double dw, double dh, double cw, double ch) {
     if (g_present_fill < 0) {
-        const char *e = getenv("DM_PRESENT_FILL"); g_present_fill = 1;
+        const char *e = getenv("DM_PRESENT_FILL"); g_present_fill = 0;   // no crop by default: when the game renders at the screen ratio the two scales are equal anyway, and until then showing the whole picture beats cutting it
         if (e) { char *end; double v = strtod(e, &end);
             if (end != e && !*end && v >= 0 && v <= 1) g_present_fill = v;
-            else MLOG("【红】DM_PRESENT_FILL=%s：要 0（适应，留边）到 1（铺满，裁切），按 1 处理", e); }
+            else MLOG("【红】DM_PRESENT_FILL=%s：要 0（适应，留边）到 1（铺满，裁切），按 0 处理", e); }
         MLOG("出图铺满 %.2f（0 留边 / 1 铺满裁切；画布与游戏画面宽高比一致时不起作用）", g_present_fill);
     }
     double fit = fmin(dw / cw, dh / ch), cover = fmax(dw / cw, dh / ch);
