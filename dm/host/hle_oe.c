@@ -253,15 +253,39 @@ static void scale3d_tick(void) {
 // registration function at main+0x27c1a0 is called nine times with x2 = main+0x181ab18 plus an offset (main+0x181ac80 for the
 // group holding DisplayModeWidth / DisplayModeHeight, registered at main+0x27c9ec and main+0x27d084, beside Gamma and
 // ShadowQuality). All of it is in bss, so the values only exist at run time.
-// Where the render size really lives (from D3Hack, github.com/CaiMiao/d3hack, and confirmed in this build): GFXNX64NVN::Globals is reached through the pointer
-// variable at main+0x1150470, and the game builds its DisplayMode from the seven qwords at Globals+0x224..+0x25C in GfxGetDesiredDisplayMode (main+0x29B1E0, the
-// same address D3Hack hooks). Those hold the window size, the UI size, the refresh / depth / MSAA and the render size and aspect ratio, so the values are found by
-// looking for the size the game is rendering at right now inside that window and are written back there.
-// 1776x816 is 2.176:1 (the phone is 2.173:1) at 1.45 Mpx -- the game's own 1600x900 budget, so the frame fills the screen at the same GPU cost (measured GPU time
-// is already 14.0 ms of the 16.67 ms budget at 1600x900; the screen's native 2868x1320 would be 2.63x that). DM_D3_RES=<width>x<height> overrides it, 0 disables.
+// Where the render size lives, cross-checked against D3Hack (github.com/CaiMiao/d3hack) and this build's own code:
+//   * GFXNX64NVN::Globals starts with dwDeviceWidth (+0x00), dwDeviceHeight (+0x04), dwReducedDeviceWidth (+0x08), dwReducedDeviceHeight (+0x0C) and
+//     flDeviceAspectRatio (+0x10); D3Hack reaches it through a pointer variable and its ResHack changes exactly these.
+//   * main+0x29B1E0 (the address D3Hack gives for GfxGetDesiredDisplayMode) builds the DisplayMode the game uses from seven qwords at source+0x224..+0x25C;
+//     in this build that source is *(main+0x1150470), while D3Hack's table names main+0x114C970 -- so both are tried and only acted on when their shape matches.
+// Nothing is written unless a candidate actually holds the size the game renders at right now, so a wrong pointer cannot corrupt anything.
+// 1776x816 is 2.176:1 (the phone is 2.173:1) at 1.45 Mpx, the same pixel budget as the game's 1600x900: fills the screen at no extra GPU cost (measured 14.0 ms of
+// the 16.67 ms budget at 1600x900; the screen's native 2868x1320 would be 2.63x). DM_D3_RES=<width>x<height> overrides it, 0 keeps the game's own size.
+extern int mtl_addr(uint64_t addr, uint64_t len, void **buf, uint64_t *off);   // nvn_mtl.m: is this address inside a registered memory pool?
+typedef struct { const char *what; uint32_t *w[4], *h[4]; int nw, nh; float *aspect; } d3_res_site;
+static d3_res_site g_res[8]; static int g_nres;
+static int d3_ptr_ok(module_t *m, uintptr_t a) {   // a pointer the game stored: not inside the image itself, and inside a pool we know
+    void *mb; uint64_t mo;
+    if (!a || (a >= (uintptr_t)m->base && a < (uintptr_t)m->base + m->size)) return 0;
+    return mtl_addr(a, 0x20, &mb, &mo);
+}
+// Collect every slot in the candidate block that holds the size being rendered at right now (Globals keeps the device size and the reduced size as two adjacent
+// pairs, so one slot each is not enough), plus the aspect ratio float beside them. Written only when both a width and a height slot were found.
+static void d3_add_site(const char *what, uint8_t *p, uint32_t w, uint32_t h, int span) {
+    if (g_nres >= 8) return;
+    d3_res_site *s = &g_res[g_nres]; memset(s, 0, sizeof *s); s->what = what;
+    for (int i = 0; i < span; i++) {
+        uint32_t v = *(const uint32_t *)(p + i * 4);
+        if (v == w && s->nw < 4) s->w[s->nw++] = (uint32_t *)(p + i * 4);
+        else if (v == h && s->nh < 4) s->h[s->nh++] = (uint32_t *)(p + i * 4);
+    }
+    if (!s->nw || !s->nh) return;
+    for (int i = 0; i < span; i++) { float f = *(const float *)(p + i * 4); if (f > 1.70f && f < 1.85f) { s->aspect = (float *)(p + i * 4); break; } }
+    g_nres++;
+    LOG("D3 显示尺寸：%s 有 %d 个宽槽 / %d 个高槽（宽高比 %s）", what, s->nw, s->nh, s->aspect ? "有" : "无");
+}
 void dm_d3_res_tick(uint32_t w, uint32_t h) {
     static int init; static module_t *main; static uint32_t want_w, want_h; static int notes, nudges;
-    static uint32_t *fw, *fh; static float *fa;
     if (!init) {
         init = 1;
         const char *e = getenv("DM_D3_RES");
@@ -273,34 +297,36 @@ void dm_d3_res_tick(uint32_t w, uint32_t h) {
             LOG("D3 显示尺寸：main 构建 %s 不是 D3 v1441792，不改（地址只对这一版有效）", main && main->build_id[0] ? main->build_id : "（产物无构建号）"); main = NULL; }
     }
     if (!main) return;
-    uintptr_t gp = *(uintptr_t *)(main->base + 0x1150470);   // GFXNX64NVN::Globals *
-    if (!gp) { if (notes++ < 3) LOG("D3 显示尺寸：Globals 指针（main+0x1150470）还是空，等下一个出图"); return; }
-    uint8_t *g = (uint8_t *)gp;
-    if (!fw) {
-        uint64_t q[8]; memcpy(q, g + 0x224, sizeof q);
-        LOG("D3 显示尺寸：Globals %p 出图前尺寸区 = %#llx %#llx %#llx %#llx %#llx %#llx %#llx %#llx（当前渲染 %ux%u）",
-            (void *)gp, (unsigned long long)q[0], (unsigned long long)q[1], (unsigned long long)q[2], (unsigned long long)q[3],
-            (unsigned long long)q[4], (unsigned long long)q[5], (unsigned long long)q[6], (unsigned long long)q[7], w, h);
-        for (uint32_t off = 0x224; off < 0x264; off += 4) {          // the size the game is rendering at right now
-            uint32_t v = *(uint32_t *)(g + off);
-            if (!fw && v == w) fw = (uint32_t *)(g + off);
-            if (!fh && v == h) fh = (uint32_t *)(g + off);
+    if (!g_nres) {   // find the sites once, then only write
+        uintptr_t g1 = *(uintptr_t *)(main->base + 0x114C970);
+        if (g1 && !d3_ptr_ok(main, g1) && notes++ < 4) LOG("D3 显示尺寸：0x114C970 → %p 不在已知内存池里，跳过", (void *)g1);
+        if (d3_ptr_ok(main, g1)) {
+            uint8_t *p = (uint8_t *)g1;
+            LOG("D3 显示尺寸：main+0x114C970 → %p，头 0x16 字节 %08x %08x %08x %08x %08x %08x", (void *)g1,
+                *(uint32_t *)p, *(uint32_t *)(p + 4), *(uint32_t *)(p + 8), *(uint32_t *)(p + 12), *(uint32_t *)(p + 16), *(uint32_t *)(p + 20));
+            d3_add_site("Globals(0x114C970)", p, w, h, 8);
         }
-        for (uint32_t off = 0x224; off < 0x264; off += 4) {
-            float f = *(const float *)(g + off);
-            if (!fa && f > 1.70f && f < 1.85f) fa = (float *)(g + off);
+        uintptr_t g2 = *(uintptr_t *)(main->base + 0x1150470);
+        if (g2 && !d3_ptr_ok(main, g2) && notes++ < 4) LOG("D3 显示尺寸：0x1150470 → %p 不在已知内存池里，跳过", (void *)g2);
+        if (d3_ptr_ok(main, g2)) {
+            uint8_t *p = (uint8_t *)g2;
+            uint64_t q[8]; memcpy(q, p + 0x224, sizeof q);
+            LOG("D3 显示尺寸：main+0x1150470 → %p，出图尺寸区 %#llx %#llx %#llx %#llx %#llx %#llx %#llx %#llx", (void *)g2,
+                (unsigned long long)q[0], (unsigned long long)q[1], (unsigned long long)q[2], (unsigned long long)q[3],
+                (unsigned long long)q[4], (unsigned long long)q[5], (unsigned long long)q[6], (unsigned long long)q[7]);
+            d3_add_site("显示模式源(0x1150470)", p + 0x224, w, h, 16);
         }
-        if (!fw || !fh) { if (notes++ < 6) LOG("D3 显示尺寸：尺寸区里没找到 %ux%u（宽=%d 高=%d），不改", w, h, !!fw, !!fh); return; }
-        LOG("D3 显示尺寸：宽 main+%#tx / 高 main+%#tx / 宽高比 %s → 改成 %ux%u",
-            (ptrdiff_t)((uint8_t *)fw - main->base), (ptrdiff_t)((uint8_t *)fh - main->base), fa ? "已找到" : "未找到", want_w, want_h);
+        if (!g_nres) { if (notes++ < 6) LOG("D3 显示尺寸：两处候选都没有 %ux%u 的形状，不改（等下一个出图）", w, h); return; }
     }
-    if (*fw != want_w) { dm_guest_write_prepare(fw, 4); *fw = want_w; }
-    if (*fh != want_h) { dm_guest_write_prepare(fh, 4); *fh = want_h; }
-    if (fa) { float a = (float)want_w / (float)want_h; if (*fa != a) { dm_guest_write_prepare(fa, 4); *fa = a; } }
-    // The game may only rebuild its display mode when the system says so: ask it to re-read once, and once more about three seconds in
+    for (int i = 0; i < g_nres; i++) {
+        for (int k = 0; k < g_res[i].nw; k++) if (*g_res[i].w[k] != want_w) { dm_guest_write_prepare(g_res[i].w[k], 4); *g_res[i].w[k] = want_w; }
+        for (int k = 0; k < g_res[i].nh; k++) if (*g_res[i].h[k] != want_h) { dm_guest_write_prepare(g_res[i].h[k], 4); *g_res[i].h[k] = want_h; }
+        if (g_res[i].aspect) { float a = (float)want_w / (float)want_h; if (*g_res[i].aspect != a) { dm_guest_write_prepare(g_res[i].aspect, 4); *g_res[i].aspect = a; } }
+    }
+    // The game rebuilds its display mode when the system says the performance configuration changed: ask for that once, and once more about three seconds in
     if (g_ntf_perfmode && (nudges == 0 || (nudges == 1 && dm_nvn_frame_count() > 180))) {
         nudges++; dm_oe_res_changed();
-        LOG("D3 显示尺寸：已写 %ux%u，通知游戏重读显示模式（第 %d 次，帧 %llu）", want_w, want_h, nudges, (unsigned long long)dm_nvn_frame_count());
+        LOG("D3 显示尺寸：已写 %ux%u（%d 处），通知游戏重读显示模式（第 %d 次，帧 %llu）", want_w, want_h, g_nres, nudges, (unsigned long long)dm_nvn_frame_count());
     }
 }
 HLE_FORCE("_ZN2nn2oe25TryPopNotificationMessageEPj", "系统通知队列；前端状态变化入队", unsigned, h_oe_TryPopMsg, uint32_t *msg) {
