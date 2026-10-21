@@ -6908,8 +6908,15 @@ static double present_scale(double dw, double dh, double cw, double ch) {
 #define DM_GAME_PRESENT_AUTOCROP 0
 #endif
 static int g_ac_on = -1, g_ac_have, g_ac_crop[4];
-static int g_ac_armed, g_ac_full_run, g_ac_warm_run;
+static int g_ac_armed, g_ac_hold, g_ac_full_run, g_ac_warm_run, g_ac_leave_run;
 static uint64_t g_ac_frame;
+#define AC_SLOTS 3
+typedef struct { __strong id<MTLTexture> tex; __strong id<MTLBuffer> buf; _Atomic int busy; } ac_probe;
+static ac_probe g_ac_probes[AC_SLOTS];
+static int ac_probe_take(void) {
+    for (int i = 0; i < AC_SLOTS; i++) if (atomic_exchange(&g_ac_probes[i].busy, 1) == 0) return i;
+    return -1;
+}
 static int auto_crop_mode(void) {
     if (g_ac_on < 0) {
         const char *e = getenv("DM_PRESENT_AUTOCROP");
@@ -6919,18 +6926,24 @@ static int auto_crop_mode(void) {
     }
     return g_ac_on;
 }
-static void auto_crop_done(id<MTLTexture> src, id<MTLBuffer> buf) {
+static void auto_crop_done_unlocked(id<MTLTexture> src, id<MTLBuffer> buf, int slot) {
+    atomic_store(&g_ac_probes[slot].busy, 0);
     const uint8_t *p = (const uint8_t *)buf.contents;
     int x0 = AC_SW, x1 = -1, y0 = AC_SH, y1 = -1;
     for (int y = 0; y < AC_SH; y++) for (int x = 0; x < AC_SW; x++) {
         const uint8_t *q = p + ((size_t)y * AC_SW + x) * 4;
         if (q[0] > 12 || q[1] > 12 || q[2] > 12) { if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
     }
-    static int ac_log; g_ac_have = 0;
+    static int ac_log;
     if (x1 < 0) { if (ac_log++ % 8 == 0) MLOG("出图内容检测：整帧全黑"); return; }
     int w = x1 - x0 + 1;
     if (ac_log++ % 8 == 0) MLOG("出图内容检测：内容 %d..%d / %d 宽（占 %d%%）%s", x0, x1, AC_SW, w * 100 / AC_SW, w >= AC_SW * 94 / 100 ? "整帧，不裁" : "偏窄");
     if (w >= AC_SW * 94 / 100) {                                        // 内容到边：不裁；after_game 模式用它确认已经离开启动加载页
+        if (g_ac_hold) {
+            if (++g_ac_leave_run >= 2) { g_ac_hold = g_ac_have = 0; g_ac_leave_run = 0; }
+            return;
+        }
+        g_ac_leave_run = 0;
         if (!g_ac_armed && g_ac_full_run < 6) g_ac_full_run++;
         if (auto_crop_mode() == 2 && !g_ac_armed && g_ac_full_run >= 6) {
             g_ac_armed = 1;
@@ -6939,6 +6952,8 @@ static void auto_crop_done(id<MTLTexture> src, id<MTLBuffer> buf) {
         return;
     }
     g_ac_full_run = 0;
+    g_ac_leave_run = 0;
+    if (g_ac_hold) return;                                              // Keep the first loading rectangle: the animated glow widens later and must not change the output size
     uint64_t lsum = 0; int warm = 0, ns = 0;
     for (int y = y0; y <= y1; y++) for (int x = x0; x <= x1; x++) {
         const uint8_t *q = p + ((size_t)y * AC_SW + x) * 4;
@@ -6959,19 +6974,35 @@ static void auto_crop_done(id<MTLTexture> src, id<MTLBuffer> buf) {
     g_ac_crop[0] = (int)(x0 * sx); g_ac_crop[2] = (int)(w * sx);
     g_ac_crop[1] = (int)(y0 * sy); g_ac_crop[3] = (int)((y1 - y0 + 1) * sy);
     if (g_ac_crop[2] < 64 || g_ac_crop[3] < 64) return;
-    g_ac_have = 1;
+    int ch = g_ac_crop[3], cw = (int)lround(ch * 16.0 / 9.0);
+    if (cw < 64 || cw > (int)src.width) return;
+    g_ac_crop[0] = ((int)src.width - cw) / 2; g_ac_crop[1] = 0; g_ac_crop[2] = cw; g_ac_crop[3] = ch;
+    g_ac_have = g_ac_hold = 1;
     MLOG("出图自动裁切：内容占宽 %d/%d → 源矩形 %d,%d %dx%d（原纹理 %lux%lu）", w, AC_SW, g_ac_crop[0], g_ac_crop[1], g_ac_crop[2], g_ac_crop[3], (unsigned long)src.width, (unsigned long)src.height);
+}
+static pthread_mutex_t g_ac_done_mu = PTHREAD_MUTEX_INITIALIZER;
+static void auto_crop_done(id<MTLTexture> src, id<MTLBuffer> buf, int slot) {
+    pthread_mutex_lock(&g_ac_done_mu);
+    auto_crop_done_unlocked(src, buf, slot);
+    pthread_mutex_unlock(&g_ac_done_mu);
 }
 static void auto_crop_tick(id<MTLCommandBuffer> cb, id<MTLTexture> src) {
     if (!auto_crop_mode()) return;
-    if (g_present_n - g_ac_frame < 15) return;
+    int every = !g_ac_armed ? 15 : 2;
+    if (g_present_n - g_ac_frame < (uint64_t)every) return;
+    int slot = ac_probe_take(); if (slot < 0) return;
     g_ac_frame = g_present_n;
     present_pipeline(MTLPixelFormatBGRA8Unorm);
-    MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:AC_SW height:AC_SH mipmapped:NO];
-    d.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead; d.storageMode = MTLStorageModePrivate;
-    id<MTLTexture> small = [g_dev newTextureWithDescriptor:d];
-    id<MTLBuffer> buf = [g_dev newBufferWithLength:(NSUInteger)AC_SW * AC_SH * 4 options:MTLResourceStorageModeShared];
-    if (!small || !buf) return;
+    ac_probe *p = &g_ac_probes[slot];
+    if (!p->tex) {
+        MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:AC_SW height:AC_SH mipmapped:NO];
+        d.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead; d.storageMode = MTLStorageModePrivate;
+        p->tex = [g_dev newTextureWithDescriptor:d];
+    }
+    if (!p->buf) p->buf = [g_dev newBufferWithLength:(NSUInteger)AC_SW * AC_SH * 4 options:MTLResourceStorageModeShared];
+    if (!p->tex || !p->buf) { atomic_store(&p->busy, 0); return; }
+    id<MTLTexture> small = p->tex;
+    id<MTLBuffer> buf = p->buf;
     MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
     rp.colorAttachments[0].texture = small; rp.colorAttachments[0].loadAction = MTLLoadActionDontCare; rp.colorAttachments[0].storeAction = MTLStoreActionStore;
     id<MTLRenderCommandEncoder> en = [cb renderCommandEncoderWithDescriptor:rp];
@@ -6985,7 +7016,7 @@ static void auto_crop_tick(id<MTLCommandBuffer> cb, id<MTLTexture> src) {
     [be copyFromTexture:small sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(AC_SW, AC_SH, 1)
                   toBuffer:buf destinationOffset:0 destinationBytesPerRow:AC_SW * 4 destinationBytesPerImage:AC_SW * AC_SH * 4];
     [be endEncoding];
-    [cb addCompletedHandler:^(id<MTLCommandBuffer> c) { (void)c; auto_crop_done(src, buf); }];
+    [cb addCompletedHandler:^(id<MTLCommandBuffer> c) { (void)c; auto_crop_done(src, buf, slot); }];
 }
 static int present_encode(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<MTLTexture> dst, const int crop[4]) {
     auto_crop_tick(cb, src);
@@ -7036,16 +7067,23 @@ static int present_encode(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<MTLTex
 // every 15 frames is a rounding error next to a frame, and it keeps the present buffer untouched.
 static void auto_crop_tick_m4(id<MTLTexture> src) {
     if (!auto_crop_mode()) return;
-    if (g_present_n - g_ac_frame < 15) return;
+    int every = !g_ac_armed ? 15 : 2;
+    if (g_present_n - g_ac_frame < (uint64_t)every) return;
+    int slot = ac_probe_take(); if (slot < 0) return;
     g_ac_frame = g_present_n;
     present_pipeline(MTLPixelFormatBGRA8Unorm);
     id<MTLCommandBuffer> cb2 = q_cb();
-    if (!cb2) return;
-    MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:AC_SW height:AC_SH mipmapped:NO];
-    d.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead; d.storageMode = MTLStorageModePrivate;
-    id<MTLTexture> small = [g_dev newTextureWithDescriptor:d];
-    id<MTLBuffer> buf = [g_dev newBufferWithLength:(NSUInteger)AC_SW * AC_SH * 4 options:MTLResourceStorageModeShared];
-    if (!small || !buf) return;
+    if (!cb2) { atomic_store(&g_ac_probes[slot].busy, 0); return; }
+    ac_probe *p = &g_ac_probes[slot];
+    if (!p->tex) {
+        MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:AC_SW height:AC_SH mipmapped:NO];
+        d.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead; d.storageMode = MTLStorageModePrivate;
+        p->tex = [g_dev newTextureWithDescriptor:d];
+    }
+    if (!p->buf) p->buf = [g_dev newBufferWithLength:(NSUInteger)AC_SW * AC_SH * 4 options:MTLResourceStorageModeShared];
+    if (!p->tex || !p->buf) { atomic_store(&p->busy, 0); return; }
+    id<MTLTexture> small = p->tex;
+    id<MTLBuffer> buf = p->buf;
     MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
     rp.colorAttachments[0].texture = small; rp.colorAttachments[0].loadAction = MTLLoadActionDontCare; rp.colorAttachments[0].storeAction = MTLStoreActionStore;
     id<MTLRenderCommandEncoder> en = [cb2 renderCommandEncoderWithDescriptor:rp];
@@ -7059,7 +7097,7 @@ static void auto_crop_tick_m4(id<MTLTexture> src) {
     [be copyFromTexture:small sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(AC_SW, AC_SH, 1)
                   toBuffer:buf destinationOffset:0 destinationBytesPerRow:AC_SW * 4 destinationBytesPerImage:AC_SW * AC_SH * 4];
     [be endEncoding];
-    [cb2 addCompletedHandler:^(id<MTLCommandBuffer> c) { (void)c; auto_crop_done(src, buf); }];
+    [cb2 addCompletedHandler:^(id<MTLCommandBuffer> c) { (void)c; auto_crop_done(src, buf, slot); }];
     [cb2 commit];
 }
 static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MTLTexture> dst, const int crop[4], int uv_i) {
