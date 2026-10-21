@@ -6908,7 +6908,7 @@ static double present_scale(double dw, double dh, double cw, double ch) {
 #define DM_GAME_PRESENT_AUTOCROP 0
 #endif
 static int g_ac_on = -1, g_ac_have, g_ac_crop[4];
-static int g_ac_armed, g_ac_full_run;
+static int g_ac_armed, g_ac_full_run, g_ac_warm_run;
 static uint64_t g_ac_frame;
 static int auto_crop_mode(void) {
     if (g_ac_on < 0) {
@@ -6939,7 +6939,21 @@ static void auto_crop_done(id<MTLTexture> src, id<MTLBuffer> buf) {
         return;
     }
     g_ac_full_run = 0;
+    uint64_t lsum = 0; int warm = 0, ns = 0;
+    for (int y = y0; y <= y1; y++) for (int x = x0; x <= x1; x++) {
+        const uint8_t *q = p + ((size_t)y * AC_SW + x) * 4;
+        int b = q[0], gg = q[1], r = q[2];
+        lsum += (uint64_t)(2126 * r + 7152 * gg + 722 * b);
+        warm += r > 80 && r * 100 > gg * 115 && gg * 100 > b * 105;
+        ns++;
+    }
+    int bright_warm = ns && lsum / (uint64_t)ns / 10000 >= 105 && warm * 100 >= ns * 60;
+    if (auto_crop_mode() == 2 && !g_ac_armed && bright_warm && ++g_ac_warm_run >= 2) {
+        g_ac_armed = 1;
+        MLOG("出图黑边检测已启用：识别到游戏内的亮暖色过场加载画面");
+    }
     if (auto_crop_mode() == 2 && !g_ac_armed) return;                   // Launch loading: keep the original full-image presentation
+    g_ac_warm_run = 0;
     if (x0 < AC_SW * 2 / 100 || AC_SW - 1 - x1 < AC_SW * 2 / 100) return;   // 两侧都得是黑边才算加载界面
     double sx = (double)src.width / AC_SW, sy = (double)src.height / AC_SH;
     g_ac_crop[0] = (int)(x0 * sx); g_ac_crop[2] = (int)(w * sx);
