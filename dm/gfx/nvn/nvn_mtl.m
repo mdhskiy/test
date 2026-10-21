@@ -6867,7 +6867,7 @@ static void auto_crop_tick(id<MTLCommandBuffer> cb, id<MTLTexture> src) {
     g_ac_frame = g_present_n;
     present_pipeline(MTLPixelFormatBGRA8Unorm);
     MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:AC_SW height:AC_SH mipmapped:NO];
-    d.usage = MTLResourceUsageRenderTarget | MTLResourceUsageShaderRead; d.storageMode = MTLStorageModePrivate;
+    d.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead; d.storageMode = MTLStorageModePrivate;
     id<MTLTexture> small = [g_dev newTextureWithDescriptor:d];
     id<MTLBuffer> buf = [g_dev newBufferWithLength:(NSUInteger)AC_SW * AC_SH * 4 options:MTLResourceStorageModeShared];
     if (!small || !buf) return;
@@ -6929,7 +6929,41 @@ static int present_encode(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<MTLTex
     [en endEncoding];
     return 1;
 }
+// The Metal 4 path cannot host a classic pass, so the bar probe gets its own small command buffer (same pattern as grab_present): one 96x44 render + blit
+// every 15 frames is a rounding error next to a frame, and it keeps the present buffer untouched.
+static void auto_crop_tick_m4(id<MTLTexture> src) {
+    if (g_ac_on < 0) { const char *e = getenv("DM_PRESENT_AUTOCROP"); g_ac_on = e ? atoi(e) : 1; }
+    if (!g_ac_on) return;
+    if (g_present_n - g_ac_frame < 15) return;
+    g_ac_frame = g_present_n;
+    present_pipeline(MTLPixelFormatBGRA8Unorm);
+    id<MTLCommandBuffer> cb2 = q_cb();
+    if (!cb2) return;
+    MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:AC_SW height:AC_SH mipmapped:NO];
+    d.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead; d.storageMode = MTLStorageModePrivate;
+    id<MTLTexture> small = [g_dev newTextureWithDescriptor:d];
+    id<MTLBuffer> buf = [g_dev newBufferWithLength:(NSUInteger)AC_SW * AC_SH * 4 options:MTLResourceStorageModeShared];
+    if (!small || !buf) return;
+    MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+    rp.colorAttachments[0].texture = small; rp.colorAttachments[0].loadAction = MTLLoadActionDontCare; rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+    id<MTLRenderCommandEncoder> en = [cb2 renderCommandEncoderWithDescriptor:rp];
+    [en setViewport:(MTLViewport){0, 0, AC_SW, AC_SH, 0, 1}];
+    [en setRenderPipelineState:g_blit_pso]; [en setFragmentTexture:present_raw_src(src) atIndex:0]; [en setFragmentSamplerState:g_blit_samp atIndex:0];
+    float uv[8] = {0, 0, 1, 1, 0, 0, 1, 1};
+    [en setFragmentBytes:uv length:sizeof uv atIndex:0];
+    [en drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+    [en endEncoding];
+    id<MTLBlitCommandEncoder> be = [cb2 blitCommandEncoder];
+    [be copyFromTexture:small sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(AC_SW, AC_SH, 1)
+                  toBuffer:buf destinationOffset:0 destinationBytesPerRow:AC_SW * 4 destinationBytesPerImage:AC_SW * AC_SH * 4];
+    [be endEncoding];
+    [cb2 addCompletedHandler:^(id<MTLCommandBuffer> c) { (void)c; auto_crop_done(src, buf); }];
+    [cb2 commit];
+}
 static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MTLTexture> dst, const int crop[4], int uv_i) {
+    auto_crop_tick_m4(src);
+    const int *use = crop;
+    if (g_ac_have && (!crop || (crop[0] == 0 && crop[1] == 0 && (NSUInteger)crop[2] == src.width && (NSUInteger)crop[3] == src.height))) use = g_ac_crop;
     NSUInteger cx = 0, cy = 0, cw = src.width, ch = src.height;
     if (use && (use[2] || use[3])) {
         if (use[0] < 0 || use[1] < 0 || use[2] <= 0 || use[3] <= 0 ||
