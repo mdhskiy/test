@@ -6833,14 +6833,70 @@ static double present_scale(double dw, double dh, double cw, double ch) {
     double fit = fmin(dw / cw, dh / ch), cover = fmax(dw / cw, dh / ch);
     return fit + (cover - fit) * g_present_fill;
 }
+// ---- 自动裁掉画面两侧黑边（加载界面把 16:9 的图缩在 2.17:1 的画布里）----
+// DM_PRESENT_AUTOCROP=1（默认开）：每隔 15 帧把当前游戏画面缩成 96x44 读回一次，只有"内容明显比整帧窄、且左右两侧都是黑边"时，
+// 才把出图源矩形换成内容区。正常游戏画面内容到边（HUD 贴边），判据不成立，出图不受影响。
+#define AC_SW 96
+#define AC_SH 44
+static int g_ac_on = -1, g_ac_have, g_ac_crop[4];
+static uint64_t g_ac_frame;
+static void auto_crop_done(id<MTLTexture> src, id<MTLBuffer> buf) {
+    const uint8_t *p = (const uint8_t *)buf.contents;
+    int x0 = AC_SW, x1 = -1, y0 = AC_SH, y1 = -1;
+    for (int y = 0; y < AC_SH; y++) for (int x = 0; x < AC_SW; x++) {
+        const uint8_t *q = p + ((size_t)y * AC_SW + x) * 4;
+        if (q[0] > 12 || q[1] > 12 || q[2] > 12) { if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
+    }
+    g_ac_have = 0;
+    if (x1 < 0) return;
+    int w = x1 - x0 + 1;
+    if (w >= AC_SW * 94 / 100) return;                                  // 内容到边：不裁
+    if (x0 < AC_SW * 2 / 100 || AC_SW - 1 - x1 < AC_SW * 2 / 100) return;   // 两侧都得是黑边才算加载界面
+    double sx = (double)src.width / AC_SW, sy = (double)src.height / AC_SH;
+    g_ac_crop[0] = (int)(x0 * sx); g_ac_crop[2] = (int)(w * sx);
+    g_ac_crop[1] = (int)(y0 * sy); g_ac_crop[3] = (int)((y1 - y0 + 1) * sy);
+    if (g_ac_crop[2] < 64 || g_ac_crop[3] < 64) return;
+    g_ac_have = 1;
+    MLOG("出图自动裁切：内容占宽 %d/%d → 源矩形 %d,%d %dx%d（原纹理 %lux%lu）", w, AC_SW, g_ac_crop[0], g_ac_crop[1], g_ac_crop[2], g_ac_crop[3], (unsigned long)src.width, (unsigned long)src.height);
+}
+static void auto_crop_tick(id<MTLCommandBuffer> cb, id<MTLTexture> src) {
+    if (g_ac_on < 0) { const char *e = getenv("DM_PRESENT_AUTOCROP"); g_ac_on = e ? atoi(e) : 1; }
+    if (!g_ac_on) return;
+    if (g_present_n - g_ac_frame < 15) return;
+    g_ac_frame = g_present_n;
+    present_pipeline(MTLPixelFormatBGRA8Unorm);
+    MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:AC_SW height:AC_SH mipmapped:NO];
+    d.usage = MTLResourceUsageRenderTarget | MTLResourceUsageShaderRead; d.storageMode = MTLStorageModePrivate;
+    id<MTLTexture> small = [g_dev newTextureWithDescriptor:d];
+    id<MTLBuffer> buf = [g_dev newBufferWithLength:(NSUInteger)AC_SW * AC_SH * 4 options:MTLResourceStorageModeShared];
+    if (!small || !buf) return;
+    MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+    rp.colorAttachments[0].texture = small; rp.colorAttachments[0].loadAction = MTLLoadActionDontCare; rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+    id<MTLRenderCommandEncoder> en = [cb renderCommandEncoderWithDescriptor:rp];
+    [en setViewport:(MTLViewport){0, 0, AC_SW, AC_SH, 0, 1}];
+    [en setRenderPipelineState:g_blit_pso]; [en setFragmentTexture:present_raw_src(src) atIndex:0]; [en setFragmentSamplerState:g_blit_samp atIndex:0];
+    float uv[8] = {0, 0, 1, 1, 0, 0, 1, 1};
+    [en setFragmentBytes:uv length:sizeof uv atIndex:0];
+    [en drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+    [en endEncoding];
+    id<MTLBlitCommandEncoder> be = [cb blitCommandEncoder];
+    [be copyFromTexture:small sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(AC_SW, AC_SH, 1)
+                  toBuffer:buf destinationOffset:0 destinationBytesPerRow:AC_SW * 4 destinationBytesPerImage:AC_SW * AC_SH * 4];
+    [be endEncoding];
+    [cb addCompletedHandler:^(id<MTLCommandBuffer> c) { (void)c; auto_crop_done(src, buf); }];
+}
 static int present_encode(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<MTLTexture> dst, const int crop[4]) {
+    auto_crop_tick(cb, src);
+    // 只有当游戏自己的裁切就是整幅画面、而自动检测发现两侧有黑边时，才换成内容区
+    const int *use = crop;
+    if (g_ac_have && (!crop || (crop[0] == 0 && crop[1] == 0 && (NSUInteger)crop[2] == src.width && (NSUInteger)crop[3] == src.height))) use = g_ac_crop;
     NSUInteger cx = 0, cy = 0, cw = src.width, ch = src.height;
-    if (crop && (crop[2] || crop[3])) {
-        if (crop[0] < 0 || crop[1] < 0 || crop[2] <= 0 || crop[3] <= 0 ||
-            (uint64_t)crop[0] + crop[2] > src.width || (uint64_t)crop[1] + crop[3] > src.height) {
-            MLOG("【红】出图裁切越界：%d,%d %dx%d / 原纹理 %lux%lu", crop[0], crop[1], crop[2], crop[3], (unsigned long)src.width, (unsigned long)src.height); return 0;
+    if (use && (use[2] || use[3])) {
+        if (use[0] < 0 || use[1] < 0 || use[2] <= 0 || use[3] <= 0 ||
+            (uint64_t)use[0] + use[2] > src.width || (uint64_t)use[1] + use[3] > src.height) {
+            MLOG("【红】出图裁切越界：%d,%d %dx%d / 原纹理 %lux%lu", use[0], use[1], use[2], use[3], (unsigned long)src.width, (unsigned long)src.height); return 0;
         }
-        cx = crop[0]; cy = crop[1]; cw = crop[2]; ch = crop[3];
+        cx = use[0]; cy = use[1]; cw = use[2]; ch = use[3];
     }
     static uint64_t last_crop[8]; uint64_t meta[8] = {src.width, src.height, cx, cy, cw, ch, dst.width, dst.height};
     if (memcmp(meta, last_crop, sizeof meta)) { memcpy(last_crop, meta, sizeof meta);
@@ -6874,12 +6930,12 @@ static int present_encode(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<MTLTex
 }
 static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MTLTexture> dst, const int crop[4], int uv_i) {
     NSUInteger cx = 0, cy = 0, cw = src.width, ch = src.height;
-    if (crop && (crop[2] || crop[3])) {
-        if (crop[0] < 0 || crop[1] < 0 || crop[2] <= 0 || crop[3] <= 0 ||
-            (uint64_t)crop[0] + crop[2] > src.width || (uint64_t)crop[1] + crop[3] > src.height) {
-            MLOG("【红】出图裁切越界：%d,%d %dx%d / 原纹理 %lux%lu", crop[0], crop[1], crop[2], crop[3], (unsigned long)src.width, (unsigned long)src.height); return 0;
+    if (use && (use[2] || use[3])) {
+        if (use[0] < 0 || use[1] < 0 || use[2] <= 0 || use[3] <= 0 ||
+            (uint64_t)use[0] + use[2] > src.width || (uint64_t)use[1] + use[3] > src.height) {
+            MLOG("【红】出图裁切越界：%d,%d %dx%d / 原纹理 %lux%lu", use[0], use[1], use[2], use[3], (unsigned long)src.width, (unsigned long)src.height); return 0;
         }
-        cx = crop[0]; cy = crop[1]; cw = crop[2]; ch = crop[3];
+        cx = use[0]; cy = use[1]; cw = use[2]; ch = use[3];
     }
     present_pipeline(dst.pixelFormat);
     double dw = dst.width, dh = dst.height, s = present_scale(dw, dh, cw, ch);

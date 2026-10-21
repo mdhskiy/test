@@ -1761,8 +1761,16 @@ static int write_region_bl(const tex_t *t, unsigned level, unsigned layer, const
         }
     return 0;
 }
+static int d3_probe(void) {   // DM_D3_PROBE=1: log every CPU texture write (used to find what the flickering lantern quad writes each frame)
+    static int v = -1;
+    if (v < 0) { const char *e = getenv("DM_D3_PROBE"); v = e && atoi(e) ? 1 : 0; }
+    return v;
+}
 static void write_texels(const tex_t *t, const view_t *v, const NVNcopyRegion *r, const uint8_t *src, size_t row, size_t img) {
     if (!t->mem) { LOG("【红】WriteTexels：贴图没有存储"); return; }
+    if (d3_probe()) LOG("探针 写贴图 ser=%llu %ux%u 格式%#x 目标%d 子区 %d,%d,%d %ux%ux%u 行距%zu 块线性%d",
+        (unsigned long long)t->serial, t->d.width, t->d.height, t->d.format, t->d.target,
+        r->xoffset, r->yoffset, r->zoffset, r->width, r->height, r->depth, row, t->has_layout ? 1 : 0);
     int bw, bh, bpb = nvn_fmt_bpb(t->d.format, &bw, &bh);
     if (!bpb) { ONCE_LOG("【红】WriteTexels：未知格式 %#x", t->d.format); return; }
     unsigned level = v && v->set_levels ? (unsigned)v->base_level : 0, layer0 = v && v->set_layers ? (unsigned)v->min_layer : 0;
