@@ -63,6 +63,10 @@ static id<MTL4CommandAllocator> g_up_alloc4[3];
 static id<MTL4CommandAllocator> g_present_alloc4[3];
 static id<MTL4CommandBuffer> g_present_cb[3];
 static id<MTL4ArgumentTable> g_vt, g_ft, g_ct, g_up_ct;
+// Last address written to every buffer slot of the persistent argument tables. An encoder must be handed the table again
+// when one of these changes; otherwise it can retain the table state from the start of the render / compute pass.
+static uint64_t g_vt_tbl[31], g_ft_tbl[31], g_ct_tbl[31];
+static uint32_t g_vt_tbl_valid, g_ft_tbl_valid, g_ct_tbl_valid;
 static id<MTL4ArgumentTable> g_present_args;
 static id<MTLBuffer> g_present_uv[3];
 int g_bloom_q = -1;   // Bloom 1/4 starting point (non-static: real-device same-process alternation sets it to 0 / 1 directly)
@@ -71,6 +75,16 @@ static id<MTLBuffer> g_bloomq_const[3];
 static id<MTLSamplerState> g_bloomq_samp;
 static id<MTLRenderPipelineState> g_bloomq_pso;
 static MTLPixelFormat g_bloomq_fmt;
+static int args_rebind(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("DM_NVN_ARGS_REBIND");
+        v = !(e && !strcmp(e, "0"));
+        if (v) MLOG("参数表地址变更后重新交给编码器（DM_NVN_ARGS_REBIND=0 可关闭）");
+        else MLOG("DM_NVN_ARGS_REBIND=0：修改参数表后不重新交给渲染编码器");
+    }
+    return v;
+}
 static id<MTLTexture> g_bloomq_view;
 static int g_bloomq_i;
 static struct { int state; uint64_t s_ser, b0_ser, b1_ser, s_h, samp_h, b1_h; const tex_t *s_tex; float threshold, coeff_g, coeff_b; } g_bloomq;
@@ -625,8 +639,21 @@ static inline void enc_r_depth_clip(id<MTL4RenderCommandEncoder> e, BOOL v) { [e
 static inline void enc_r_stencil_ref(id<MTL4RenderCommandEncoder> e, uint32_t f, uint32_t b) { (void)b; [e setStencilReferenceValue:f]; }
 static inline void enc_r_blend_color(id<MTL4RenderCommandEncoder> e, float r, float g, float b, float a) { [e setBlendColorRed:r green:g blue:b alpha:a]; }
 static inline void enc_r_visibility(id<MTL4RenderCommandEncoder> e, MTLVisibilityResultMode m, NSUInteger o) { [e setVisibilityResultMode:m offset:o]; }
-static inline void enc_r_vbuf(id<MTL4RenderCommandEncoder> e, NSUInteger i, uint64_t gpu) { (void)e; [g_vt setAddress:gpu atIndex:i]; }
-static inline void enc_r_args(id<MTL4RenderCommandEncoder> e, MTLRenderStages s, uint64_t gpu, NSUInteger i) { (void)e; [(s == MTLRenderStageVertex ? g_vt : g_ft) setAddress:gpu atIndex:i]; }
+static inline void enc_r_vbuf(id<MTL4RenderCommandEncoder> e, NSUInteger i, uint64_t gpu) {
+    [g_vt setAddress:gpu atIndex:i];
+    if (i < 31 && args_rebind() && (!(g_vt_tbl_valid & (1u << i)) || g_vt_tbl[i] != gpu))
+        [e setArgumentTable:g_vt atStages:MTLRenderStageVertex];
+    if (i < 31) { g_vt_tbl[i] = gpu; g_vt_tbl_valid |= 1u << i; }
+}
+static inline void enc_r_args(id<MTL4RenderCommandEncoder> e, MTLRenderStages s, uint64_t gpu, NSUInteger i) {
+    if (s == MTLRenderStageVertex) { enc_r_vbuf(e, i, gpu); return; }
+    [g_ft setAddress:gpu atIndex:i];
+    // Argument tables are shared and mutable. Hand the table to the encoder again after changing the shader-argument
+    // address so this draw records the current address rather than the table state from the start of the pass.
+    if (i < 31 && args_rebind() && (!(g_ft_tbl_valid & (1u << i)) || g_ft_tbl[i] != gpu))
+        [e setArgumentTable:g_ft atStages:MTLRenderStageFragment];
+    if (i < 31) { g_ft_tbl[i] = gpu; g_ft_tbl_valid |= 1u << i; }
+}
 static inline void enc_r_draw(id<MTL4RenderCommandEncoder> e, MTLPrimitiveType p, NSUInteger v, NSUInteger n) { [e drawPrimitives:p vertexStart:v vertexCount:n]; }
 static inline void enc_r_draw_instanced(id<MTL4RenderCommandEncoder> e, MTLPrimitiveType p, NSUInteger v, NSUInteger n, NSUInteger i, NSUInteger b) { [e drawPrimitives:p vertexStart:v vertexCount:n instanceCount:i baseInstance:b]; }
 static inline void enc_r_draw_indirect(id<MTL4RenderCommandEncoder> e, MTLPrimitiveType p, uint64_t gpu) { [e drawPrimitives:p indirectBuffer:gpu]; }
@@ -636,7 +663,12 @@ static inline id<MTL4ComputeCommandEncoder> enc_c_begin(MTLComputePassDescriptor
 static inline id<MTLComputeCommandEncoder> enc_c_begin_concurrent(id<MTLCommandBuffer> cb) { return [cb computeCommandEncoderWithDispatchType:MTLDispatchTypeConcurrent]; }
 static inline void enc_c_end(id e) { m4_end(e); }
 static inline void enc_c_pso(id e, id<MTLComputePipelineState> p) { [e setComputePipelineState:p]; }
-static inline void enc_c_args(id e, uint64_t gpu, NSUInteger i) { (void)e; [g_ct setAddress:gpu atIndex:i]; }
+static inline void enc_c_args(id e, uint64_t gpu, NSUInteger i) {
+    [g_ct setAddress:gpu atIndex:i];
+    if (i < 31 && args_rebind() && (!(g_ct_tbl_valid & (1u << i)) || g_ct_tbl[i] != gpu))
+        [(id<MTL4ComputeCommandEncoder>)e setArgumentTable:g_ct];
+    if (i < 31) { g_ct_tbl[i] = gpu; g_ct_tbl_valid |= 1u << i; }
+}
 static inline void enc_c_dispatch(id e, MTLSize n, MTLSize t) { [e dispatchThreadgroups:n threadsPerThreadgroup:t]; }
 static inline void enc_c_dispatch_indirect(id e, uint64_t ind, MTLSize t) { [(id<MTL4ComputeCommandEncoder>)e dispatchThreadgroupsWithIndirectBuffer:ind threadsPerThreadgroup:t]; }
 static inline id enc_b_begin(id cb) { return [cb respondsToSelector:@selector(beginCommandBufferWithAllocator:)] ? [cb computeCommandEncoder] : [cb blitCommandEncoder]; }
@@ -692,10 +724,10 @@ void mtl_sub_copy(uint64_t src, uint64_t dst, uint64_t n) {
 static id<MTLBuffer> g_ubs_buf; static size_t g_ubs_off, g_ubs_size;
 // Inline updates inside an open render pass are deferred instead of ending the pass. Metal cannot copy into a buffer inside a render pass, so each update used to end it: all attachments stored,
 // reloaded by the next pass, new encoders (Metroid Dread about 246 times a frame, Tears of the Kingdom about 50). NVN applies the update in command order, so the draws after it in the pass must
-// read the new data: a draw whose uniform binding overlaps a deferred update reads a shadow made only of the updates deferred in this pass, latest first per byte, and only when they cover the
-// whole bound range (then the shadow is exactly what the GPU would read, whatever earlier frames still have in flight). The real copies are encoded in order when the pass ends (rp_end), so later
-// passes and the CPU see them as before. The pass still ends before a draw that would need more: a binding the deferred updates cover only in part, or a read of the deferred data through a vertex,
-// index, indirect or storage buffer (ubd_conflict). Off in TBDR mode (it reorders passes). DM_NVN_UB_DEFER=0 turns it off
+// read the new data. A draw whose uniform binding overlaps a deferred update reads a shadow made from the current guest bytes plus the updates deferred in this pass, latest first per byte;
+// partial coverage is valid because the untouched bytes keep their pre-defer content. The real copies are encoded in order when the pass ends (rp_end), so later passes and the CPU see them
+// as before. The pass still ends before a draw that reads deferred data through a vertex, index, indirect or storage buffer (ubd_conflict).
+// Off in TBDR mode (it reorders passes). DM_NVN_UB_DEFER=0 turns it off.
 static size_t arena_alloc(size_t n, id<MTLBuffer> *buf); static inline void args_dirty_all(void);
 typedef struct { uint64_t lo, hi, gpu; size_t off; __unsafe_unretained id<MTLBuffer> buf; } ubd_ent;   // data at buf + off (the ubs ring; a ring block replaced meanwhile lives until this submission completes)
 enum { UBD_MAX = 4096 };   // D3's HUD pass issues one update per element (hundreds per pass); at 512 the array filled, later updates bypassed the queue while ubd_shadow still laid out the stale entries -- the element drew with another element's matrix (a grey rectangle on the lantern, a new one each frame)
@@ -704,14 +736,8 @@ static uint64_t g_ubd_deferred, g_ubd_conflicts;   // updates deferred, passes e
 static int ubd_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_UB_DEFER"); v = !(e && !strcmp(e, "0")); if (!v) MLOG("DM_NVN_UB_DEFER=0：通道内的 uniform 更新照旧结束通道"); } return v && !tbdr_on(); }
 void mtl_ubd_stats(uint64_t *deferred, uint64_t *conflicts) { *deferred = g_ubd_deferred; *conflicts = g_ubd_conflicts; }
 static int ubd_hits(uint64_t lo, uint64_t hi) { for (int i = 0; i < g_nubd; i++) if (lo < g_ubd[i].hi && g_ubd[i].lo < hi) return 1; return 0; }
-// Whether the deferred updates cover [lo, hi) entirely (any order of overlap): the union of their ranges clipped to it, swept from lo
-static int ubd_covers(uint64_t lo, uint64_t hi) {
-    for (uint64_t at = lo; at < hi;) { uint64_t next = at;
-        for (int i = 0; i < g_nubd; i++) if (g_ubd[i].lo <= at && g_ubd[i].hi > next) next = g_ubd[i].hi;
-        if (next == at) return 0; at = next; }
-    return 1;
-}
-// GPU address of the shadow of uniform range [lo, hi) (ubd_covers holds): one deferred update holding all of it and suitably aligned is used in place; otherwise the updates are laid into the arena in order
+// GPU address of the shadow of uniform range [lo, hi): one deferred update holding all of it and suitably aligned is used in place;
+// otherwise the guest content plus the deferred updates are laid into the arena in order (partial coverage included).
 // DM_NVN_UBD_ARENA=1: never hand a draw the ring address in place, always lay the data into the arena (diagnostic for the in-place path)
 static int ubd_arena_only(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_UBD_ARENA"); v = e && !strcmp(e, "1"); if (v) MLOG("DM_NVN_UBD_ARENA=1：推迟数据一律经 arena 拷贝，不再就地引用环地址"); } return v; }
 // The block/offset ubd_shadow() last handed out (diagnostic: DM_NVN_CBDUMP also saves the bytes the draw is really bound to, not just guest memory)
@@ -738,7 +764,7 @@ static void ubd_flush(void) {
         if (!mtl_addr(e->lo, e->hi - e->lo, &db, &dof)) continue;
         enc_b_copy_buffer(blit_buf(0, 0, e->lo, e->hi), e->buf, e->off, (__bridge id<MTLBuffer>)db, dof, e->hi - e->lo); }
 }
-// The bytes [lo, lo+n) as the deferred updates leave them (ubd_covers holds): for bindless handles read from uniform memory (ubo_handle)
+// The bytes [lo, lo+n) as the deferred updates leave them: for bindless handles read from uniform memory (ubo_handle)
 static void ubd_read(uint64_t lo, size_t n, void *out) {
     for (int i = 0; i < g_nubd; i++) { const ubd_ent *e = &g_ubd[i]; uint64_t a = e->lo > lo ? e->lo : lo, b = e->hi < lo + n ? e->hi : lo + n;
         if (a < b) memcpy((uint8_t *)out + (a - lo), (const uint8_t *)e->buf.contents + e->off + (a - e->lo), (size_t)(b - a)); }
@@ -5319,8 +5345,9 @@ static void wide_run(const p_draw_idx *di) {
     if (!g_wide_runs++) MLOG("8 位索引 GPU 展开：首次 %d 个绘制（索引本提交里有 GPU 侧写入，在渲染通道前由计算展开成 16 位）", n);
     else if (g_wide_runs % 3600 == 0) MLOG("8 位索引 GPU 展开：%llu 次 %llu 个绘制，其中切开渲染通道 %llu 次", (unsigned long long)g_wide_runs, (unsigned long long)g_wide_draws, (unsigned long long)g_wide_splits);
 }
-// Whether this draw needs more from the inline updates deferred in the open pass than the uniform shadows give (see mtl_sub_update): a uniform binding they cover only in part, a bindless
-// handle in such a part, or their data read as vertices, indices, indirect arguments or a storage buffer. Then the pass ends first and the updates land before the draw, as before
+// Whether this draw needs more from the inline updates deferred in the open pass than the uniform shadows give (see mtl_sub_update):
+// their data read as vertices, indices, indirect arguments or a storage buffer. Uniform and bindless-handle bindings can be
+// partially overlaid by ubd_shadow / ubo_handle, so they no longer force the pass to end.
 static int ubd_conflict(NvProg *pr, const p_draw *dw, const p_draw_idx *di) {
     for (int s_ = 0; s_ < 16; s_++) if (S.vbuf[s_].address && ubd_hits(S.vbuf[s_].address, S.vbuf[s_].address + S.vbuf[s_].size)) return 1;
     if (di && di->ibuf && ubd_hits(di->ibuf, di->ibuf + (uint64_t)di->count * 4)) return 1;
@@ -5329,9 +5356,10 @@ static int ubd_conflict(NvProg *pr, const p_draw *dw, const p_draw_idx *di) {
         for (int i = 0; i < sh->rf.nb; i++) { const nvn_rbind *b = &sh->rf.b[i]; if (b->reg >= 16) continue;
             const p_bind_buf *u = b->kind == NVN_RB_SBUFP ? &S.ssbo[st][b->reg] : &S.ubo[st][b->reg];
             if (!u->addr) continue;
-            if (b->kind == NVN_RB_CBUF) { if (ubd_hits(u->addr, u->addr + u->size) && !ubd_covers(u->addr, u->addr + u->size)) return 1; }
-            else if (b->kind == NVN_RB_TEXU || b->kind == NVN_RB_SAMPU) { uint64_t h = u->addr + b->off; if (ubd_hits(h, h + 4) && !ubd_covers(h, h + 4)) return 1; }
-            else if (b->kind == NVN_RB_SBUFP || b->kind == NVN_RB_UBOP) { if (ubd_hits(u->addr, u->addr + (u->size ? u->size : 1))) return 1; } } }
+            if (b->kind == NVN_RB_SBUFP || b->kind == NVN_RB_UBOP) { if (ubd_hits(u->addr, u->addr + (u->size ? u->size : 1))) return 1; }
+            // CBUF / TEXU / SAMPU are consumed through ubd_shadow() and ubo_handle(), which start from the
+            // pre-defer guest bytes and overlay the deferred writes in order. A partial cover is complete data.
+        } }
     return 0;
 }
 static void draw(const p_draw *dw, const p_draw_idx *di) {
