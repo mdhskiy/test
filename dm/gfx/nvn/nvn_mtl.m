@@ -7009,7 +7009,9 @@ static int present_encode(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<MTLTex
     // Scale the game picture uniformly and center it: with DM_PRESENT_FILL=1 (the default) it covers the canvas and what does not
     // fit is cropped, with 0 the whole picture fits and the rest of the canvas stays black -- never stretched, either way.
     // When the ratio difference is < 1% (the remainder from the game width being a multiple of 8 in the full-screen setup, e.g. 1952x900 versus 2868x1320 differs by 0.17%) fill directly, leaving no few-pixel border
+    int auto_used = g_ac_have && use == g_ac_crop;
     double dw = dst.width, dh = dst.height, s = present_scale(dw, dh, cw, ch);
+    if (auto_used) s = fmax(s, fmax(dw / cw, dh / ch));   // Cropping reveals the artwork's own 16:9 rectangle: cover the canvas with it instead of fitting that rectangle into new bars
     MTLViewport vp = {floor((dw - cw * s) / 2), floor((dh - ch * s) / 2), round(cw * s), round(ch * s), 0, 1};
     if (fabs((dw / dh) / ((double)cw / ch) - 1) < 0.01) vp = (MTLViewport){0, 0, dw, dh, 0, 1};
     int full = vp.originX == 0 && vp.originY == 0 && vp.width == dw && vp.height == dh;
@@ -7073,7 +7075,9 @@ static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MT
         cx = use[0]; cy = use[1]; cw = use[2]; ch = use[3];
     }
     present_pipeline(dst.pixelFormat);
+    int auto_used = g_ac_have && use == g_ac_crop;
     double dw = dst.width, dh = dst.height, s = present_scale(dw, dh, cw, ch);
+    if (auto_used) s = fmax(s, fmax(dw / cw, dh / ch));   // Cropping reveals the artwork's own 16:9 rectangle: cover the canvas with it instead of fitting that rectangle into new bars
     MTLViewport vp = {floor((dw - cw * s) / 2), floor((dh - ch * s) / 2), round(cw * s), round(ch * s), 0, 1};
     if (fabs((dw / dh) / ((double)cw / ch) - 1) < 0.01) vp = (MTLViewport){0, 0, dw, dh, 0, 1};
     int full = vp.originX == 0 && vp.originY == 0 && vp.width == dw && vp.height == dh;
