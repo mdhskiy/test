@@ -101,6 +101,8 @@ def header(g):
     if any(not re.fullmatch(r'[0-9a-f]{8,16}', k) for k in afr): sys.exit(f'{g.id}: alpha_from_red 要写片元着色器键（8–16 位小写十六进制）| alpha_from_red takes fragment shader keys (8-16 lowercase hex digits): {afr}')
     ubf = g.words('ub_flush_fs', '')   # fragment shader key prefixes whose draws end the pass when deferred uniform writes overlap one of their buffers (nvn_mtl.m ubd_conflict)
     if any(not re.fullmatch(r'[0-9a-f]{8,16}', k) for k in ubf): sys.exit(f'{g.id}: ub_flush_fs 要写片元着色器键（8–16 位小写十六进制）| ub_flush_fs takes fragment shader keys (8-16 lowercase hex digits): {ubf}')
+    pac = g.get('present_autocrop', 'off')   # present black-bar cropping: off / all / after_game (after_game arms only after a stable full-width frame, so the launch screen keeps its original layout)
+    if pac not in ('off', 'all', 'after_game'): sys.exit(f'{g.id}: present_autocrop 只能是 off / all / after_game | present_autocrop must be off / all / after_game: {pac}')
     rcd = g.get('render_cond', 'off')   # NVN conditional rendering evaluated at replay, timestamp reports with counter 0 (nvn_mtl.m OP_RENDER_COND): on / off
     if rcd not in ('on', 'off'): sys.exit(f'{g.id}: render_cond 只能是 on / off | render_cond must be on or off: {rcd}')
     tfu = g.get('tex_flush_upload', 'off')   # textures written by the CPU into a pool and published with nvnMemoryPoolFlushMappedRange are uploaded like packaged ones (hle_nvn.c): on / off
@@ -142,6 +144,7 @@ def header(g):
          f'#define DM_GAME_FEEDBACK_SNAP {q(" ".join(fbs))}',
          f'#define DM_GAME_ALPHA_FROM_RED {q(" ".join(afr))}',
          f'#define DM_GAME_UB_FLUSH_FS {q(" ".join(ubf))}',
+         f'#define DM_GAME_PRESENT_AUTOCROP {dict(off=0, all=1, after_game=2)[pac]}',
          f'#define DM_GAME_TEX_FLUSH_UPLOAD {int(tfu == "on")}',
          f'#define DM_GAME_RENDER_COND {int(rcd == "on")}',
          f'#define DM_GAME_TEX_DIRTY_UPLOAD {int(tdu == "on")}',

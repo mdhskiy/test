@@ -49,6 +49,11 @@ shader_note	Diablo III: Eternal Collection shaders (provisional profile)
 tex_flush_upload	on
 tex_dirty_upload	on
 
+# The launch loading artwork is drawn inside a 2.17:1 frame with side bars and must keep its original
+# full-image presentation. Once gameplay has held a stable full-width image, later in-run loading screens
+# may be cropped to their actual 16:9 content and scaled uniformly to fill the phone without stretching.
+present_autocrop	after_game
+
 # The soft-edge additive light shader samples the screen through a UBO that is rewritten once per light. On the
 # deferred-uniform path its 1464-vertex draw intermittently used stale screen-transform data and copied a wrong screen
 # rectangle over the lantern. End the pass before this single draw so its uniforms land first; the rest of the frame

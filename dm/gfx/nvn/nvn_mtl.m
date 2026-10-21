@@ -6904,8 +6904,21 @@ static double present_scale(double dw, double dh, double cw, double ch) {
 // 才把出图源矩形换成内容区。正常游戏画面内容到边（HUD 贴边），判据不成立，出图不受影响。
 #define AC_SW 96
 #define AC_SH 44
+#ifndef DM_GAME_PRESENT_AUTOCROP
+#define DM_GAME_PRESENT_AUTOCROP 0
+#endif
 static int g_ac_on = -1, g_ac_have, g_ac_crop[4];
+static int g_ac_armed, g_ac_full_run;
 static uint64_t g_ac_frame;
+static int auto_crop_mode(void) {
+    if (g_ac_on < 0) {
+        const char *e = getenv("DM_PRESENT_AUTOCROP");
+        g_ac_on = e && *e ? atoi(e) : DM_GAME_PRESENT_AUTOCROP;
+        if (g_ac_on != 1 && g_ac_on != 2) g_ac_on = 0;
+        if (g_ac_on) MLOG("出图黑边检测：%s%s", g_ac_on == 1 ? "全部画面" : "仅在见过稳定整屏内容之后", e && *e ? "（DM_PRESENT_AUTOCROP）" : "（游戏档案 present_autocrop）");
+    }
+    return g_ac_on;
+}
 static void auto_crop_done(id<MTLTexture> src, id<MTLBuffer> buf) {
     const uint8_t *p = (const uint8_t *)buf.contents;
     int x0 = AC_SW, x1 = -1, y0 = AC_SH, y1 = -1;
@@ -6917,7 +6930,16 @@ static void auto_crop_done(id<MTLTexture> src, id<MTLBuffer> buf) {
     if (x1 < 0) { if (ac_log++ % 8 == 0) MLOG("出图内容检测：整帧全黑"); return; }
     int w = x1 - x0 + 1;
     if (ac_log++ % 8 == 0) MLOG("出图内容检测：内容 %d..%d / %d 宽（占 %d%%）%s", x0, x1, AC_SW, w * 100 / AC_SW, w >= AC_SW * 94 / 100 ? "整帧，不裁" : "偏窄");
-    if (w >= AC_SW * 94 / 100) return;                                  // 内容到边：不裁
+    if (w >= AC_SW * 94 / 100) {                                        // 内容到边：不裁；after_game 模式用它确认已经离开启动加载页
+        if (!g_ac_armed && g_ac_full_run < 6) g_ac_full_run++;
+        if (auto_crop_mode() == 2 && !g_ac_armed && g_ac_full_run >= 6) {
+            g_ac_armed = 1;
+            MLOG("出图黑边检测已启用：已连续检测到 %d 次整屏内容，启动加载页不再受影响", g_ac_full_run);
+        }
+        return;
+    }
+    g_ac_full_run = 0;
+    if (auto_crop_mode() == 2 && !g_ac_armed) return;                   // Launch loading: keep the original full-image presentation
     if (x0 < AC_SW * 2 / 100 || AC_SW - 1 - x1 < AC_SW * 2 / 100) return;   // 两侧都得是黑边才算加载界面
     double sx = (double)src.width / AC_SW, sy = (double)src.height / AC_SH;
     g_ac_crop[0] = (int)(x0 * sx); g_ac_crop[2] = (int)(w * sx);
@@ -6927,8 +6949,7 @@ static void auto_crop_done(id<MTLTexture> src, id<MTLBuffer> buf) {
     MLOG("出图自动裁切：内容占宽 %d/%d → 源矩形 %d,%d %dx%d（原纹理 %lux%lu）", w, AC_SW, g_ac_crop[0], g_ac_crop[1], g_ac_crop[2], g_ac_crop[3], (unsigned long)src.width, (unsigned long)src.height);
 }
 static void auto_crop_tick(id<MTLCommandBuffer> cb, id<MTLTexture> src) {
-    if (g_ac_on < 0) { const char *e = getenv("DM_PRESENT_AUTOCROP"); g_ac_on = e ? atoi(e) : 0; }   // 0 by default: cropping the loading screen looked worse than the bars
-    if (!g_ac_on) return;
+    if (!auto_crop_mode()) return;
     if (g_present_n - g_ac_frame < 15) return;
     g_ac_frame = g_present_n;
     present_pipeline(MTLPixelFormatBGRA8Unorm);
@@ -6998,8 +7019,7 @@ static int present_encode(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<MTLTex
 // The Metal 4 path cannot host a classic pass, so the bar probe gets its own small command buffer (same pattern as grab_present): one 96x44 render + blit
 // every 15 frames is a rounding error next to a frame, and it keeps the present buffer untouched.
 static void auto_crop_tick_m4(id<MTLTexture> src) {
-    if (g_ac_on < 0) { const char *e = getenv("DM_PRESENT_AUTOCROP"); g_ac_on = e ? atoi(e) : 0; }   // 0 by default: cropping the loading screen looked worse than the bars
-    if (!g_ac_on) return;
+    if (!auto_crop_mode()) return;
     if (g_present_n - g_ac_frame < 15) return;
     g_ac_frame = g_present_n;
     present_pipeline(MTLPixelFormatBGRA8Unorm);
