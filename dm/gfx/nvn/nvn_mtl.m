@@ -712,7 +712,10 @@ static int ubd_covers(uint64_t lo, uint64_t hi) {
     return 1;
 }
 // GPU address of the shadow of uniform range [lo, hi) (ubd_covers holds): one deferred update holding all of it and suitably aligned is used in place; otherwise the updates are laid into the arena in order
+// DM_NVN_UBD_ARENA=1: never hand a draw the ring address in place, always lay the data into the arena (diagnostic for the in-place path)
+static int ubd_arena_only(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_UBD_ARENA"); v = e && !strcmp(e, "1"); if (v) MLOG("DM_NVN_UBD_ARENA=1：推迟数据一律经 arena 拷贝，不再就地引用环地址"); } return v; }
 static uint64_t ubd_shadow(uint64_t lo, uint64_t hi) {
+    if (!ubd_arena_only())
     for (int i = g_nubd - 1; i >= 0; i--) { const ubd_ent *e = &g_ubd[i];
         if (e->lo <= lo && hi <= e->hi) { int later = 0; for (int j = i + 1; j < g_nubd; j++) later |= lo < g_ubd[j].hi && g_ubd[j].lo < hi;
             uint64_t g = e->gpu + (lo - e->lo); if (!later && !(g & 15)) return g; break; } }
