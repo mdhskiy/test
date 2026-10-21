@@ -294,7 +294,7 @@ static void d3_add_site(const char *what, uint8_t *p, uint32_t w, uint32_t h, in
     LOG("D3 显示尺寸：%s 有 %d 个宽槽 / %d 个高槽（宽高比 %s）", what, s->nw, s->nh, s->aspect ? "有" : "无");
 }
 void dm_d3_res_tick(uint32_t w, uint32_t h) {
-    static int init; static module_t *main; static uint32_t want_w, want_h, want_ui_w, want_ui_h; static int notes, nudges;
+    static int init; static module_t *main; static uint32_t want_w, want_h, want_ui_w, want_ui_h; static int notes, nudges, globals_done, mode_done;
     if (!init) {
         init = 1;
         const char *e = getenv("DM_D3_RES");
@@ -308,40 +308,45 @@ void dm_d3_res_tick(uint32_t w, uint32_t h) {
             LOG("D3 显示尺寸：main 构建 %s 不是 D3 v1441792，不改（地址只对这一版有效）", main && main->build_id[0] ? main->build_id : "（产物无构建号）"); main = NULL; }
     }
     if (!main) return;
-    if (!g_nres) {   // find the sites once, then only write
+    if (!globals_done) {
         uintptr_t g1 = *(uintptr_t *)(main->base + 0x114C970);
-        if (g1 && !d3_ptr_ok(main, g1) && notes++ < 4) LOG("D3 显示尺寸：0x114C970 → %p 所在内存未映射，跳过", (void *)g1);
+        if (g1 && !d3_ptr_ok(main, g1) && notes++ < 4) LOG("D3 显示尺寸：0x114C970 → %p 当前不可读，稍后重试", (void *)g1);
         if (d3_ptr_ok(main, g1)) {
             uint8_t *p = (uint8_t *)g1;
             LOG("D3 显示尺寸：main+0x114C970 → %p，头 0x16 字节 %08x %08x %08x %08x %08x %08x", (void *)g1,
                 *(uint32_t *)p, *(uint32_t *)(p + 4), *(uint32_t *)(p + 8), *(uint32_t *)(p + 12), *(uint32_t *)(p + 16), *(uint32_t *)(p + 20));
             d3_add_site("Globals(0x114C970)", p, w, h, 8);
+            globals_done = 1;
         }
+    }
+    if (!mode_done) {
         uintptr_t g2 = *(uintptr_t *)(main->base + 0x1150470);
-        if (g2 && !d3_ptr_ok(main, g2) && notes++ < 4) LOG("D3 显示尺寸：0x1150470 → %p 所在内存未映射，跳过", (void *)g2);
+        if (g2 && !d3_ptr_ok(main, g2) && notes++ < 4) LOG("D3 显示尺寸：0x1150470 → %p 当前不可读，稍后重试", (void *)g2);
         if (d3_ptr_ok(main, g2)) {
             uint8_t *p = (uint8_t *)g2;
             uint64_t q[8]; memcpy(q, p + 0x224, sizeof q);
-            if (*(uint32_t *)(p + 0x244) == w && *(uint32_t *)(p + 0x248) == h) {
+            uint32_t rw = *(uint32_t *)(p + 0x244), rh = *(uint32_t *)(p + 0x248);
+            if (rw >= 640 && rh >= 360 && rw <= 4096 && rh <= 4096) {
                 g_d3_ui_width = (uint32_t *)(p + 0x23c);
                 g_d3_ui_height = (uint32_t *)(p + 0x240);
+                LOG("D3 显示尺寸：main+0x1150470 → %p，显示模式 flags/mode=%08x/%08x win=(%d,%d) %dx%d UI=%ux%u render=%ux%u refresh/depth=%u/%u MSAA=%u aspect=%.6f",
+                    (void *)g2,
+                    *(uint32_t *)(p + 0x224), *(uint32_t *)(p + 0x228),
+                    *(int32_t *)(p + 0x22c), *(int32_t *)(p + 0x230),
+                    *(int32_t *)(p + 0x234), *(int32_t *)(p + 0x238),
+                    *(uint32_t *)(p + 0x23c), *(uint32_t *)(p + 0x240),
+                    rw, rh,
+                    *(uint32_t *)(p + 0x24c), *(uint32_t *)(p + 0x250),
+                    *(uint32_t *)(p + 0x254), *(float *)(p + 0x258));
+                LOG("D3 显示尺寸：main+0x1150470 → %p，出图尺寸区 %#llx %#llx %#llx %#llx %#llx %#llx %#llx %#llx", (void *)g2,
+                    (unsigned long long)q[0], (unsigned long long)q[1], (unsigned long long)q[2], (unsigned long long)q[3],
+                    (unsigned long long)q[4], (unsigned long long)q[5], (unsigned long long)q[6], (unsigned long long)q[7]);
+                d3_add_site("显示模式源(0x1150470)", p + 0x224, rw, rh, 16);
+                mode_done = 1;
             }
-            LOG("D3 显示尺寸：main+0x1150470 → %p，显示模式 flags/mode=%08x/%08x win=(%d,%d) %dx%d UI=%ux%u render=%ux%u refresh/depth=%u/%u MSAA=%u aspect=%.6f",
-                (void *)g2,
-                *(uint32_t *)(p + 0x224), *(uint32_t *)(p + 0x228),
-                *(int32_t *)(p + 0x22c), *(int32_t *)(p + 0x230),
-                *(int32_t *)(p + 0x234), *(int32_t *)(p + 0x238),
-                *(uint32_t *)(p + 0x23c), *(uint32_t *)(p + 0x240),
-                *(uint32_t *)(p + 0x244), *(uint32_t *)(p + 0x248),
-                *(uint32_t *)(p + 0x24c), *(uint32_t *)(p + 0x250),
-                *(uint32_t *)(p + 0x254), *(float *)(p + 0x258));
-            LOG("D3 显示尺寸：main+0x1150470 → %p，出图尺寸区 %#llx %#llx %#llx %#llx %#llx %#llx %#llx %#llx", (void *)g2,
-                (unsigned long long)q[0], (unsigned long long)q[1], (unsigned long long)q[2], (unsigned long long)q[3],
-                (unsigned long long)q[4], (unsigned long long)q[5], (unsigned long long)q[6], (unsigned long long)q[7]);
-            d3_add_site("显示模式源(0x1150470)", p + 0x224, w, h, 16);
         }
-        if (!g_nres) { if (notes++ < 6) LOG("D3 显示尺寸：两处候选都没有 %ux%u 的形状，不改（等下一个出图）", w, h); return; }
     }
+    if (!g_nres) return;
     for (int i = 0; i < g_nres; i++) {
         for (int k = 0; k < g_res[i].nw; k++) if (*g_res[i].w[k] != want_w) { dm_guest_write_prepare(g_res[i].w[k], 4); *g_res[i].w[k] = want_w; }
         for (int k = 0; k < g_res[i].nh; k++) if (*g_res[i].h[k] != want_h) { dm_guest_write_prepare(g_res[i].h[k], 4); *g_res[i].h[k] = want_h; }
