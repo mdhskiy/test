@@ -740,12 +740,20 @@ void mtl_sub_update(const void *data, uint64_t dst, uint64_t n) {
     if (!mtl_addr(dst, n, &db, &dof)) MDIE("uniform 更新目标不在任何内存池内 dst=%#llx n=%#llx", (unsigned long long)dst, (unsigned long long)n);
     int defer = enc_open() && g_nubd < UBD_MAX && ubd_on();
     size_t need = (n + 255u) & ~(size_t)255u;   // 256-aligned slots: a deferred update is read in place by draws as a uniform buffer
-    if (!g_ubs_buf || g_ubs_off + need > g_ubs_size) {
+    // A deferred entry keeps the ring block's GPU address (ubd_ent.buf is unretained). Retiring the block while entries still point into it leaves them
+    // dangling and ubd_shadow() then hands draws a stale or recycled uniform -- D3's HUD pass issues hundreds of updates per pass and rotated the 1 MB ring
+    // mid-pass, so a UI element drew with another element's matrix (a solid rectangle over the lantern, a new one every frame).
+    // So: size the ring for a whole submission and rotate only when no deferred entry refers to it.
+    if (!g_ubs_buf || (g_ubs_off + need > g_ubs_size && g_nubd == 0)) {
         if (g_ubs_buf) defer_obj_release(g_ubs_buf);   // copies already encoded still reference the old block: release after this submission completes
-        g_ubs_size = MAX((size_t)1 << 20, need);
+        g_ubs_size = MAX((size_t)64 << 20, need);
         g_ubs_buf = [g_dev newBufferWithLength:g_ubs_size options:MTLResourceStorageModeShared];
         if (!g_ubs_buf) MDIE("uniform 更新环分配失败 %#zx", g_ubs_size);
         res_add(g_ubs_buf); g_ubs_off = 0;
+    }
+    if (g_ubs_off + need > g_ubs_size) {   // full while entries still point into it: stage this update and copy it straight through, never retire the block
+        id<MTLBuffer> tmp = [g_dev newBufferWithBytes:data length:n options:MTLResourceStorageModeShared];
+        if (tmp) { enc_b_copy_buffer(blit_buf(0, 0, dst, dst + n), tmp, 0, (__bridge id<MTLBuffer>)db, dof, n); defer_obj_release(tmp); return; }
     }
     memcpy((uint8_t *)g_ubs_buf.contents + g_ubs_off, data, n);
     if (defer) { g_ubd[g_nubd++] = (ubd_ent){dst, dst + n, g_ubs_buf.gpuAddress + g_ubs_off, g_ubs_off, g_ubs_buf}; g_ubd_deferred++; args_dirty_all(); }   // see ubd_shadow
