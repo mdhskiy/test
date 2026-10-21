@@ -2928,10 +2928,23 @@ static void vconv_elem(int f, const uint8_t *p, float o[4]) {
             break; }
     }
 }
+// Float input fed an integer vertex format: NVN's fetch turns the value into a float (UChar4 -> 4 floats of those integers), but Metal refuses to bind an
+// integer vertex format to a float input, and the "keep the original format" fallback handed the shader the raw bytes (D3's lantern flame came out as
+// randomly placed solid quads, one small rectangle per frame). Convert the value on the CPU into float32 like the other direction above.
+static void vconv_elem_f(int f, const uint8_t *p, float o[4]) {
+    int ib, is, in = vconv_int(f, &ib, &is);
+    o[0] = o[1] = o[2] = 0; o[3] = 1;
+    for (int i = 0; i < in && i < 4; i++) {
+        if (ib == 8) o[i] = is ? (float)(int8_t)p[i] : (float)p[i];
+        else { uint16_t h; memcpy(&h, p + 2 * i, 2); o[i] = is ? (float)(int16_t)h : (float)h; }
+    }
+}
 static int vconv_wanted(const nvn_refl *rf, int v, const pso_key *k) {   // does Metal input v of this pipeline take converted data
     int a = rf->v[v].nvn, ct = rf->v[v].ct, ib, is;
-    if ((ct != NVN_CT_UINT && ct != NVN_CT_INT) || a >= 16) return 0;
+    if (a >= 16) return 0;
     int f = k ? k->attr[a].fmt : S.attr[a].fmt;
+    if (ct == NVN_CT_FLOAT) return vconv_int(f, &ib, &is) != 0;   // integer vertex format into a float input
+    if (ct != NVN_CT_UINT && ct != NVN_CT_INT) return 0;
     return vconv_ncomp(f) || (vconv_int(f, &ib, &is) && is != (ct == NVN_CT_INT));
 }
 // Per submission, one conversion per (range, format, layout): KTGL draws the same mesh several times a frame (depth, shadow, G-buffer)
@@ -2942,15 +2955,17 @@ static void vconv_bind(id<MTL4RenderCommandEncoder> en, const nvn_refl *rf) {
         if (!vconv_wanted(rf, v, NULL) || rf->v[v].nvn >= S.nattr) continue;
         int a = rf->v[v].nvn, st = S.attr[a].stream, f = S.attr[a].fmt; uint32_t off = S.attr[a].offset, stride = st < 16 ? S.stream[st].stride : 0;
         uint64_t addr = st < 16 ? S.vbuf[st].address : 0, size = st < 16 ? S.vbuf[st].size : 0, gpu = 0;
-        for (int i = 0; i < 64 && !gpu; i++) if (g_vconv[i].serial == g_sub_serial && g_vconv[i].addr == addr && g_vconv[i].size == size && g_vconv[i].fmt == (uint32_t)f && g_vconv[i].off == off && g_vconv[i].stride == stride) gpu = g_vconv[i].gpu;
+        int asf = rf->v[v].ct == NVN_CT_FLOAT; uint32_t key = (uint32_t)f | (asf ? 0x80000000u : 0);
+        for (int i = 0; i < 64 && !gpu; i++) if (g_vconv[i].serial == g_sub_serial && g_vconv[i].addr == addr && g_vconv[i].size == size && g_vconv[i].fmt == key && g_vconv[i].off == off && g_vconv[i].stride == stride) gpu = g_vconv[i].gpu;
         if (!gpu && addr) {
             uint64_t es = (uint64_t)vconv_size(f), nv = stride == 0 ? 1 : size >= off + es ? (size - off - es) / stride + 1 : 0;
             if (nv && nv * 16 <= (4u << 20)) {
                 id<MTLBuffer> b; size_t o = arena_alloc((size_t)nv * 16, &b); float *d = (float *)((uint8_t *)b.contents + o);
-                for (uint64_t i = 0; i < nv; i++) vconv_elem(f, (const uint8_t *)(uintptr_t)(addr + off + i * stride), d + 4 * i);
+                for (uint64_t i = 0; i < nv; i++) { const uint8_t *ep = (const uint8_t *)(uintptr_t)(addr + off + i * stride); if (asf) vconv_elem_f(f, ep, d + 4 * i); else vconv_elem(f, ep, d + 4 * i); }
                 gpu = b.gpuAddress + o;
-                int c = g_vconv_next++ % 64; g_vconv[c].addr = addr; g_vconv[c].size = size; g_vconv[c].serial = g_sub_serial; g_vconv[c].fmt = (uint32_t)f; g_vconv[c].off = off; g_vconv[c].stride = stride; g_vconv[c].gpu = gpu;
-                if (vconv_ncomp(f)) RED_ONCE(89, "顶点属性格式 %#x 喂给整数输入：回放时在 CPU 上换成 float32 位模式另绑（Maxwell 取顶点时的转换）", f);
+                int c = g_vconv_next++ % 64; g_vconv[c].addr = addr; g_vconv[c].size = size; g_vconv[c].serial = g_sub_serial; g_vconv[c].fmt = key; g_vconv[c].off = off; g_vconv[c].stride = stride; g_vconv[c].gpu = gpu;
+                if (asf) RED_ONCE(97, "顶点属性格式 %#x（整数）喂给 float 输入：回放时在 CPU 上换成 float32 值另绑（Maxwell 取顶点时的转换）", f);
+                else if (vconv_ncomp(f)) RED_ONCE(89, "顶点属性格式 %#x 喂给整数输入：回放时在 CPU 上换成 float32 位模式另绑（Maxwell 取顶点时的转换）", f);
                 else RED_ONCE(96, "顶点属性格式 %#x（8 / 16 位整数）喂给符号相反的整数输入：回放时在 CPU 上按格式本身的符号扩成 32 位另绑", f);
             } else if (nv) RED_ONCE(90, "顶点属性换算：范围 %llu 个顶点超出帧内暂存（格式 %#x）", (unsigned long long)nv, f);
         }
@@ -6861,7 +6876,7 @@ static void auto_crop_done(id<MTLTexture> src, id<MTLBuffer> buf) {
     MLOG("出图自动裁切：内容占宽 %d/%d → 源矩形 %d,%d %dx%d（原纹理 %lux%lu）", w, AC_SW, g_ac_crop[0], g_ac_crop[1], g_ac_crop[2], g_ac_crop[3], (unsigned long)src.width, (unsigned long)src.height);
 }
 static void auto_crop_tick(id<MTLCommandBuffer> cb, id<MTLTexture> src) {
-    if (g_ac_on < 0) { const char *e = getenv("DM_PRESENT_AUTOCROP"); g_ac_on = e ? atoi(e) : 1; }
+    if (g_ac_on < 0) { const char *e = getenv("DM_PRESENT_AUTOCROP"); g_ac_on = e ? atoi(e) : 0;   // off by default: cropping the loading screen looked worse than the bars }
     if (!g_ac_on) return;
     if (g_present_n - g_ac_frame < 15) return;
     g_ac_frame = g_present_n;
@@ -6932,7 +6947,7 @@ static int present_encode(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<MTLTex
 // The Metal 4 path cannot host a classic pass, so the bar probe gets its own small command buffer (same pattern as grab_present): one 96x44 render + blit
 // every 15 frames is a rounding error next to a frame, and it keeps the present buffer untouched.
 static void auto_crop_tick_m4(id<MTLTexture> src) {
-    if (g_ac_on < 0) { const char *e = getenv("DM_PRESENT_AUTOCROP"); g_ac_on = e ? atoi(e) : 1; }
+    if (g_ac_on < 0) { const char *e = getenv("DM_PRESENT_AUTOCROP"); g_ac_on = e ? atoi(e) : 0;   // off by default: cropping the loading screen looked worse than the bars }
     if (!g_ac_on) return;
     if (g_present_n - g_ac_frame < 15) return;
     g_ac_frame = g_present_n;
