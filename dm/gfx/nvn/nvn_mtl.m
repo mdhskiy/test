@@ -6994,6 +6994,7 @@ static void auto_crop_done_unlocked(id<MTLTexture> src, id<MTLBuffer> buf, int s
         MLOG("出图黑边检测已启用：识别到游戏内的亮暖色过场加载画面");
     }
     if (auto_crop_mode() == 2 && !g_ac_armed) return;                   // Launch loading: keep the original full-image presentation
+    if (auto_crop_mode() == 2 && !bright_warm) return;                  // Menus / character sheets / inventory can be dark and narrow: never rescale them
     g_ac_warm_run = 0;
     if (x0 < AC_SW * 2 / 100 || AC_SW - 1 - x1 < AC_SW * 2 / 100) return;   // 两侧都得是黑边才算加载界面
     double sx = (double)src.width / AC_SW, sy = (double)src.height / AC_SH;
