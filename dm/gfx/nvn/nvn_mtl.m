@@ -689,7 +689,40 @@ void mtl_sub_copy(uint64_t src, uint64_t dst, uint64_t n) {
 
 // Inline uniform update (UpdateUniformBuffer): the data is copied into the host's own shared ring at encode time, then copied in order to the destination.
 // Previously it was read from command memory only when the GPU executed - if the game recycles command memory before the GPU runs, it reads the bytes of the next batch of commands (SMBW's fountain water wave simulation got the wrong coefficients and diverged to ±65504).
+// D3 fills a 64 MiB block about every 25-27 frames; replacing it on every wrap added 64 MiB to the residency set about
+// eleven times per 300 frames and retired the old blocks. Keep four blocks and reuse a completed one instead.
+enum { UBS_POOL = 4 };
+typedef struct { __strong id<MTLBuffer> buf; size_t cap; uint64_t fence; } ubs_pool_ent;
+static ubs_pool_ent g_ubs_pool[UBS_POOL]; static int g_ubs_slot = -1;
 static id<MTLBuffer> g_ubs_buf; static size_t g_ubs_off, g_ubs_size;
+// A temporary block is still possible for an unusually large update or if all four pool blocks are in flight.
+static void ubs_rotate(size_t need) {
+    size_t want = MAX((size_t)64 << 20, need);
+    if (g_ubs_slot >= 0) g_ubs_pool[g_ubs_slot].fence = g_fence + 1;
+    else if (g_ubs_buf) defer_obj_release(g_ubs_buf);   // leaving an overflow block: retire it after this submission
+    int best = -1;
+    for (int i = 0; i < UBS_POOL; i++) {
+        ubs_pool_ent *e = &g_ubs_pool[i];
+        if (i != g_ubs_slot && e->buf && e->cap >= want && e->fence <= g_done) { best = i; break; }
+    }
+    if (best < 0) for (int i = 0; i < UBS_POOL; i++) {
+        ubs_pool_ent *e = &g_ubs_pool[i];
+        if (i == g_ubs_slot || (e->buf && e->fence > g_done)) continue;
+        if (e->buf) defer_obj_release(e->buf);   // rare resize: old block is already complete
+        e->buf = [g_dev newBufferWithLength:want options:MTLResourceStorageModeShared];
+        if (!e->buf) continue;
+        e->cap = want; e->fence = 0; res_add(e->buf); best = i; break;
+    }
+    if (best >= 0) {
+        g_ubs_slot = best; g_ubs_buf = g_ubs_pool[best].buf; g_ubs_size = g_ubs_pool[best].cap; g_ubs_off = 0;
+        g_ubs_pool[best].fence = g_fence + 1;
+        return;
+    }
+    g_ubs_slot = -1;
+    g_ubs_buf = [g_dev newBufferWithLength:want options:MTLResourceStorageModeShared];
+    if (!g_ubs_buf) MDIE("uniform 更新池分配失败 %#zx", want);
+    g_ubs_size = want; g_ubs_off = 0; res_add(g_ubs_buf);
+}
 // Inline updates inside an open render pass are deferred instead of ending the pass. Metal cannot copy into a buffer inside a render pass, so each update used to end it: all attachments stored,
 // reloaded by the next pass, new encoders (Metroid Dread about 246 times a frame, Tears of the Kingdom about 50). NVN applies the update in command order, so the draws after it in the pass must
 // read the new data: a draw whose uniform binding overlaps a deferred update reads a shadow made only of the updates deferred in this pass, latest first per byte, and only when they cover the
@@ -750,22 +783,15 @@ void mtl_sub_update(const void *data, uint64_t dst, uint64_t n) {
     if (!mtl_addr(dst, n, &db, &dof)) MDIE("uniform 更新目标不在任何内存池内 dst=%#llx n=%#llx", (unsigned long long)dst, (unsigned long long)n);
     int defer = enc_open() && g_nubd < UBD_MAX && ubd_on();
     size_t need = (n + 255u) & ~(size_t)255u;   // 256-aligned slots: a deferred update is read in place by draws as a uniform buffer
-    // A deferred entry keeps the ring block's GPU address (ubd_ent.buf is unretained). Retiring the block while entries still point into it leaves them
-    // dangling and ubd_shadow() then hands draws a stale or recycled uniform -- D3's HUD pass issues hundreds of updates per pass and rotated the 1 MB ring
-    // mid-pass, so a UI element drew with another element's matrix (a solid rectangle over the lantern, a new one every frame).
-    // So: size the ring for a whole submission and rotate only when no deferred entry refers to it.
-    if (!g_ubs_buf || (g_ubs_off + need > g_ubs_size && g_nubd == 0)) {
-        if (g_ubs_buf) defer_obj_release(g_ubs_buf);   // copies already encoded still reference the old block: release after this submission completes
-        g_ubs_size = MAX((size_t)64 << 20, need);
-        g_ubs_buf = [g_dev newBufferWithLength:g_ubs_size options:MTLResourceStorageModeShared];
-        if (!g_ubs_buf) MDIE("uniform 更新环分配失败 %#zx", g_ubs_size);
-        res_add(g_ubs_buf); g_ubs_off = 0;
-    }
+    // A deferred entry keeps the ring block's GPU address (ubd_ent.buf is unretained), so rotate only when no deferred
+    // entry refers into the current block. ubs_rotate() picks a block whose previous submission has completed.
+    if (!g_ubs_buf || (g_ubs_off + need > g_ubs_size && g_nubd == 0)) ubs_rotate(need);
     if (g_ubs_off + need > g_ubs_size) {   // full while entries still point into it: stage this update and copy it straight through, never retire the block
         id<MTLBuffer> tmp = [g_dev newBufferWithBytes:data length:n options:MTLResourceStorageModeShared];
         if (tmp) { enc_b_copy_buffer(blit_buf(0, 0, dst, dst + n), tmp, 0, (__bridge id<MTLBuffer>)db, dof, n); defer_obj_release(tmp); return; }
     }
     memcpy((uint8_t *)g_ubs_buf.contents + g_ubs_off, data, n);
+    if (g_ubs_slot >= 0) g_ubs_pool[g_ubs_slot].fence = g_fence + 1;
     if (defer) { g_ubd[g_nubd++] = (ubd_ent){dst, dst + n, g_ubs_buf.gpuAddress + g_ubs_off, g_ubs_off, g_ubs_buf}; g_ubd_deferred++; args_dirty_all(); }   // see ubd_shadow
     else enc_b_copy_buffer(blit_buf(0, 0, dst, dst + n), g_ubs_buf, g_ubs_off, (__bridge id<MTLBuffer>)db, dof, n);
     g_ubs_off += need;
