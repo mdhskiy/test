@@ -720,6 +720,10 @@ static uint64_t ubd_shadow(uint64_t lo, uint64_t hi) {
         if (e->lo <= lo && hi <= e->hi) { int later = 0; for (int j = i + 1; j < g_nubd; j++) later |= lo < g_ubd[j].hi && g_ubd[j].lo < hi;
             uint64_t g = e->gpu + (lo - e->lo); if (!later && !(g & 15)) return g; break; } }
     id<MTLBuffer> ab; size_t o = arena_alloc((size_t)(hi - lo), &ab); uint8_t *d = (uint8_t *)ab.contents + o;
+    // Start from the guest content: the caller also takes this path when the deferred entries cover only part of the binding, and the bytes they do not
+    // cover must keep their pre-defer value (arena memory is uninitialised).
+    void *gb; uint64_t gof;
+    if (mtl_addr(lo, (size_t)(hi - lo), &gb, &gof)) { const uint8_t *gs = (const uint8_t *)[(__bridge id<MTLBuffer>)gb contents]; if (gs) memcpy(d, gs + gof, (size_t)(hi - lo)); }
     for (int i = 0; i < g_nubd; i++) { const ubd_ent *e = &g_ubd[i]; uint64_t a = e->lo > lo ? e->lo : lo, b = e->hi < hi ? e->hi : hi;
         if (a < b) memcpy(d + (a - lo), (const uint8_t *)e->buf.contents + e->off + (a - e->lo), (size_t)(b - a)); }
     return ab.gpuAddress + o;
@@ -3438,9 +3442,11 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
             void *mb; uint64_t mo, gpu;
             if (!u || !u->addr || !mtl_gpu_addr(u->addr, 1, &mb, &mo, &gpu)) { RED_ONCE(16, "阶段 %d cb%d 没有绑定 uniform 缓冲", nvn_stage, reg); continue; }
             use_rec("buf", u->addr, u->size, 0, NULL);
-            if (g_nubd && ubd_hits(u->addr, u->addr + u->size)) {   // inline updates deferred in this pass (see mtl_sub_update); ubd_conflict made sure they cover the binding
-                if (ubd_covers(u->addr, u->addr + u->size)) gpu = ubd_shadow(u->addr, u->addr + u->size);
-                else RED_ONCE(92, "通道内推迟的 uniform 更新只盖住绑定的一部分（阶段 %d cb%d）：读的是更新前的内容", nvn_stage, reg); }
+            // Inline updates deferred in this pass (see mtl_sub_update). This used to require ubd_covers (the entries covering the whole binding) and otherwise
+            // read the guest content, which still holds the pre-defer values: D3's HUD updates part of one 2384-byte UBO per element, so nearly every element
+            // drew with the previous element's matrix and texture (a solid rectangle over the lantern, a new one every frame).
+            // ubd_shadow now overlays the deferred entries on top of the guest content, so a partial cover is correct too.
+            if (g_nubd && ubd_hits(u->addr, u->addr + u->size)) gpu = ubd_shadow(u->addr, u->addr + u->size);
             if (nvn_stage == 0 && reg == 0 && g_ui_moff != 0) { uint64_t pg = ui_mat_patch(u, mb, mo); if (pg) gpu = pg; }
             if (bl) {
                 PD("B %llu st%d cb reg%d addr=%#llx size=%llu pool=%#llx+%#llx f=%g,%g,%g,%g", g_stat_pass, nvn_stage, reg, (unsigned long long)u->addr, (unsigned long long)u->size,
