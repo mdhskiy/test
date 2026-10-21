@@ -263,8 +263,9 @@ static void scale3d_tick(void) {
 // Nothing is written unless a candidate actually holds the size the game renders at right now, so a wrong pointer cannot corrupt anything.
 // 1776x816 is 2.176:1 (the phone is 2.173:1) at 1.45 Mpx, the same pixel budget as the game's 1600x900: fills the screen at no extra GPU cost (measured 14.0 ms of
 // the 16.67 ms budget at 1600x900; the screen's native 2868x1320 would be 2.63x). DM_D3_RES=<width>x<height> overrides it, 0 keeps the game's own size.
-// Is this address range actually mapped in our task? The graphics globals live on the game's own heap, not in an NVN pool, so the pool check that mtl_addr does
-// rejected them (both candidates were reported "not in a known pool"); a region query is the honest test, and it keeps a wrong pointer from faulting.
+// Is this address range readable in our task? The display objects live in main's BSS, so
+// rejecting pointers inside the module image (as an earlier version did) skipped every
+// candidate. vm_read_overwrite performs the real safety test without faulting.
 static int dm_addr_mapped(uint64_t a, uint64_t n) {
     if (!a || a < 0x100000000ull || (a & 3) || n > 0x1000) return 0;
     uint8_t probe[0x1000]; vm_size_t got = 0;

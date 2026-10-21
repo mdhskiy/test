@@ -7029,7 +7029,10 @@ static void auto_crop_done(id<MTLTexture> src, id<MTLBuffer> buf, int slot) {
 }
 static void auto_crop_tick(id<MTLCommandBuffer> cb, id<MTLTexture> src) {
     if (!auto_crop_mode()) return;
-    int every = !g_ac_armed ? 15 : 2;
+    // Probe quickly only while a loading rectangle is latched (to leave it promptly).
+    // Armed gameplay is the overwhelmingly common case; 15-frame sampling cuts the
+    // readback path's wakeups and bandwidth by 7.5x without delaying the next loading art.
+    int every = g_ac_hold ? 2 : 15;
     if (g_present_n - g_ac_frame < (uint64_t)every) return;
     int slot = ac_probe_take(); if (slot < 0) return;
     g_ac_frame = g_present_n;
