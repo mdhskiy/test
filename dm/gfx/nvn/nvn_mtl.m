@@ -6876,7 +6876,7 @@ static void auto_crop_done(id<MTLTexture> src, id<MTLBuffer> buf) {
     MLOG("出图自动裁切：内容占宽 %d/%d → 源矩形 %d,%d %dx%d（原纹理 %lux%lu）", w, AC_SW, g_ac_crop[0], g_ac_crop[1], g_ac_crop[2], g_ac_crop[3], (unsigned long)src.width, (unsigned long)src.height);
 }
 static void auto_crop_tick(id<MTLCommandBuffer> cb, id<MTLTexture> src) {
-    if (g_ac_on < 0) { const char *e = getenv("DM_PRESENT_AUTOCROP"); g_ac_on = e ? atoi(e) : 0;   // off by default: cropping the loading screen looked worse than the bars }
+    if (g_ac_on < 0) { const char *e = getenv("DM_PRESENT_AUTOCROP"); g_ac_on = e ? atoi(e) : 0; }   // 0 by default: cropping the loading screen looked worse than the bars
     if (!g_ac_on) return;
     if (g_present_n - g_ac_frame < 15) return;
     g_ac_frame = g_present_n;
@@ -6947,7 +6947,7 @@ static int present_encode(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<MTLTex
 // The Metal 4 path cannot host a classic pass, so the bar probe gets its own small command buffer (same pattern as grab_present): one 96x44 render + blit
 // every 15 frames is a rounding error next to a frame, and it keeps the present buffer untouched.
 static void auto_crop_tick_m4(id<MTLTexture> src) {
-    if (g_ac_on < 0) { const char *e = getenv("DM_PRESENT_AUTOCROP"); g_ac_on = e ? atoi(e) : 0;   // off by default: cropping the loading screen looked worse than the bars }
+    if (g_ac_on < 0) { const char *e = getenv("DM_PRESENT_AUTOCROP"); g_ac_on = e ? atoi(e) : 0; }   // 0 by default: cropping the loading screen looked worse than the bars
     if (!g_ac_on) return;
     if (g_present_n - g_ac_frame < 15) return;
     g_ac_frame = g_present_n;
