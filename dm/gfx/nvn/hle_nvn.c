@@ -460,24 +460,28 @@ NVN(nvnProgramFinalize, void, NVNprogram *p) { mtl_prog_release((prog_t *)p); ((
 // keys_hash reading control + 0x704). It also serves DM_NVN_SHDUMP, whose replay layer saves shaders missing from the map.
 #define PK_MAGIC 0x504B5953u   // 'PKYS': a stale / reused side-table entry must be recognisable before its ctl pointers are touched
 #define CTL_MAGIC 0x434C5431u  // 'CLT1': host copy of a control section (16-byte header, data after it) -- freed copies are marked by clearing it
-typedef struct { uint32_t magic; uint8_t key[6][8]; uint8_t ok; void *ctl[6]; } prog_keys_t;
+typedef struct { uint32_t magic; uint8_t key[6][8]; uint8_t ok; void *ctl[6]; uint64_t serial; } prog_keys_t;
 static void *ctl_new(void) { uint8_t *c = calloc(1, 0x880 + 16); if (c) *(uint32_t *)c = CTL_MAGIC; return c; }
 static uint8_t *ctl_data(void *c) { return c && *(const uint32_t *)c == CTL_MAGIC ? (uint8_t *)c + 16 : NULL; }
 static void ctl_free(void *c) { if (c) { *(uint32_t *)c = 0; free(c); } }
 static pthread_mutex_t g_pk_mu = PTHREAD_MUTEX_INITIALIZER; static CFMutableDictionaryRef g_pk;   // a dedicated table (keys not shared with other side tables)
-static prog_keys_t *pk_get(const void *p, int make) {
-    pthread_mutex_lock(&g_pk_mu);
+static prog_keys_t *pk_get_locked(const prog_t *p, int make) {
     if (!g_pk) g_pk = CFDictionaryCreateMutable(NULL, 0, NULL, NULL);
     prog_keys_t *k = (prog_keys_t *)CFDictionaryGetValue(g_pk, p);
     if (!k && make) { k = calloc(1, sizeof *k); k->magic = PK_MAGIC; CFDictionarySetValue(g_pk, p, k); }
-    else if (k && k->magic != PK_MAGIC) { for (int i = 0; i < 6; i++) k->ctl[i] = NULL; memset(k->key, 0, sizeof k->key); k->ok = 0; k->magic = PK_MAGIC; }
-    pthread_mutex_unlock(&g_pk_mu);
+    else if (k && (k->magic != PK_MAGIC || k->serial != p->serial)) {
+        if (k->magic == PK_MAGIC) for (int i = 0; i < 6; i++) ctl_free(k->ctl[i]);
+        memset(k->key, 0, sizeof k->key); memset(k->ctl, 0, sizeof k->ctl); k->ok = 0; k->magic = PK_MAGIC;
+    }
+    if (k) k->serial = p->serial;
     return k;
 }
 static void pk_drop(const void *p) {
     pthread_mutex_lock(&g_pk_mu);
     prog_keys_t *k = g_pk ? (prog_keys_t *)CFDictionaryGetValue(g_pk, p) : NULL;
-    if (k) { for (int i = 0; i < 6; i++) ctl_free(k->ctl[i]); k->magic = 0; CFDictionaryRemoveValue(g_pk, p); free(k); }
+    if (k && k->serial == ((const prog_t *)p)->serial) {
+        for (int i = 0; i < 6; i++) ctl_free(k->ctl[i]); k->magic = 0; CFDictionaryRemoveValue(g_pk, p); free(k);
+    }
     pthread_mutex_unlock(&g_pk_mu);
 }
 // mapped = 1: computed only when the code area is in a registered memory pool (at SetShaders: Mario sets some programs with an unmapped address first and fills it in before the first draw)
@@ -502,18 +506,21 @@ static int keys_hash(const NVNshaderData *sd, int mapped, uint8_t out[8]) {
 }
 int prog_key(const prog_t *p, unsigned st, uint8_t key[8]) {
     if (st >= p->nstage) return 0;
-    prog_keys_t *k = pk_get(p, 1);
+    pthread_mutex_lock(&g_pk_mu);
+    prog_keys_t *k = pk_get_locked(p, 1);
+    if (!k) { pthread_mutex_unlock(&g_pk_mu); return 0; }
     if (!(k->ok >> st & 1)) {
         // Recompute from the host copy taken at SetShaders, never from p->sd[st].control: that pointer is the game's and may be dead by now (D3 still hit SIGBUS in
         // keys_hash with a garbage control pointer even after the copy existed -- the object can be reused, and the stale pointer came back). k->ctl[st] is memory we
         // allocated, so dereferencing it is always safe; when the stage has no control section there is no key at all and the caller skips the stage.
         uint8_t *cd = ctl_data(k->ctl[st]);
-        if (!cd) return 0;                       // no copy, or the copy was freed: no key rather than a wild read (D3 crashed here three times)
+        if (!cd) { pthread_mutex_unlock(&g_pk_mu); return 0; }   // no copy, or the copy was freed: no key rather than a wild read (D3 crashed here three times)
         NVNshaderData sd = p->sd[st]; sd.control = cd;
         if (!keys_hash(&sd, 1, k->key[st])) memset(k->key[st], 0, 8);
         k->ok |= (uint8_t)(1u << st);
     }
     memcpy(key, k->key[st], 8);
+    pthread_mutex_unlock(&g_pk_mu);
     return 1;
 }
 NVN(nvnProgramSetShaders, NVNboolean, NVNprogram *p, int n, const NVNshaderData *sd) {
@@ -521,7 +528,9 @@ NVN(nvnProgramSetShaders, NVNboolean, NVNprogram *p, int n, const NVNshaderData 
     if (n < 0 || n > 6) { LOG("【红】ProgramSetShaders 阶段数 %d", n); return 0; }
     mtl_prog_release(o); o->nstage = n; memcpy(o->sd, sd, n * sizeof *sd); o->serial = nvn_new_serial();
     // The keys are computed here (see prog_key in nvn_obj.h): the control section is only guaranteed valid during this call; the code area lives in a memory pool and stays valid while the program is in use
-    prog_keys_t *k = pk_get(p, 1);
+    pthread_mutex_lock(&g_pk_mu);
+    prog_keys_t *k = pk_get_locked(o, 1);
+    if (!k) { pthread_mutex_unlock(&g_pk_mu); LOG("【红】ProgramSetShaders：着色器键侧表分配失败"); return 0; }
     k->ok = 0;
     for (int i = 0; i < n; i++) {
         // Copy the control section into host memory before anything reads it: it is only guaranteed valid during this call, and
@@ -539,6 +548,7 @@ NVN(nvnProgramSetShaders, NVNboolean, NVNprogram *p, int n, const NVNshaderData 
         if (have) k->ok |= (uint8_t)(1u << i);
     }
     OLOG("ProgramSetShaders %p n=%d data0=%#llx", (void *)p, n, n ? (unsigned long long)sd[0].data : 0ull);
+    pthread_mutex_unlock(&g_pk_mu);
     return 1;
 }
 
