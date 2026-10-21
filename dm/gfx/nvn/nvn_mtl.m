@@ -698,7 +698,7 @@ static id<MTLBuffer> g_ubs_buf; static size_t g_ubs_off, g_ubs_size;
 // index, indirect or storage buffer (ubd_conflict). Off in TBDR mode (it reorders passes). DM_NVN_UB_DEFER=0 turns it off
 static size_t arena_alloc(size_t n, id<MTLBuffer> *buf); static inline void args_dirty_all(void);
 typedef struct { uint64_t lo, hi, gpu; size_t off; __unsafe_unretained id<MTLBuffer> buf; } ubd_ent;   // data at buf + off (the ubs ring; a ring block replaced meanwhile lives until this submission completes)
-enum { UBD_MAX = 512 };
+enum { UBD_MAX = 4096 };   // D3's HUD pass issues one update per element (hundreds per pass); at 512 the array filled, later updates bypassed the queue while ubd_shadow still laid out the stale entries -- the element drew with another element's matrix (a grey rectangle on the lantern, a new one each frame)
 static ubd_ent g_ubd[UBD_MAX]; static int g_nubd;
 static uint64_t g_ubd_deferred, g_ubd_conflicts;   // updates deferred, passes ended before a draw that needed more (the 驻留集 line)
 static int ubd_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_UB_DEFER"); v = !(e && !strcmp(e, "0")); if (!v) MLOG("DM_NVN_UB_DEFER=0：通道内的 uniform 更新照旧结束通道"); } return v && !tbdr_on(); }
