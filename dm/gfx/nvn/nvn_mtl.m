@@ -6964,9 +6964,12 @@ static void auto_crop_done_unlocked(id<MTLTexture> src, id<MTLBuffer> buf, int s
     if (x1 < 0) { if (ac_log++ % 8 == 0) MLOG("出图内容检测：整帧全黑"); return; }
     int w = x1 - x0 + 1;
     if (ac_log++ % 8 == 0) MLOG("出图内容检测：内容 %d..%d / %d 宽（占 %d%%）%s", x0, x1, AC_SW, w * 100 / AC_SW, w >= AC_SW * 94 / 100 ? "整帧，不裁" : "偏窄");
-    if (w >= AC_SW * 94 / 100) {                                        // 内容到边：不裁；after_game 模式用它确认已经离开启动加载页
+    if (w >= AC_SW * 94 / 100) {                                        // Content reaches both sides: no crop. After_game also uses this to leave a latched loading screen.
         if (g_ac_hold) {
-            if (++g_ac_leave_run >= 2) { g_ac_hold = g_ac_have = 0; g_ac_leave_run = 0; }
+            if (++g_ac_leave_run >= 12) {
+                g_ac_hold = g_ac_have = 0; g_ac_leave_run = 0;
+                MLOG("出图自动裁切结束：已连续检测到 12 次整屏内容");
+            }
             return;
         }
         g_ac_leave_run = 0;
@@ -6978,8 +6981,7 @@ static void auto_crop_done_unlocked(id<MTLTexture> src, id<MTLBuffer> buf, int s
         return;
     }
     g_ac_full_run = 0;
-    g_ac_leave_run = 0;
-    if (g_ac_hold) return;                                              // Keep the first loading rectangle: the animated glow widens later and must not change the output size
+    if (g_ac_hold) { g_ac_leave_run = 0; return; }                      // Keep the first loading rectangle: animated glow may widen later and must not change the output size.
     uint64_t lsum = 0; int warm = 0, ns = 0;
     for (int y = y0; y <= y1; y++) for (int x = x0; x <= x1; x++) {
         const uint8_t *q = p + ((size_t)y * AC_SW + x) * 4;
@@ -6994,18 +6996,30 @@ static void auto_crop_done_unlocked(id<MTLTexture> src, id<MTLBuffer> buf, int s
         MLOG("出图黑边检测已启用：识别到游戏内的亮暖色过场加载画面");
     }
     if (auto_crop_mode() == 2 && !g_ac_armed) return;                   // Launch loading: keep the original full-image presentation
-    if (auto_crop_mode() == 2 && !bright_warm) return;                  // Menus / character sheets / inventory can be dark and narrow: never rescale them
     g_ac_warm_run = 0;
-    if (x0 < AC_SW * 2 / 100 || AC_SW - 1 - x1 < AC_SW * 2 / 100) return;   // 两侧都得是黑边才算加载界面
     double sx = (double)src.width / AC_SW, sy = (double)src.height / AC_SH;
+    int content_h = y1 - y0 + 1;
+    int left_margin = x0, right_margin = AC_SW - 1 - x1;
+    double content_aspect = (double)w * sx / ((double)content_h * sy);
+    // D3's in-run loading artwork is a centred, full-height 16:9 image. A colour
+    // test misses both dark frames and the grey/white transition, while a generic
+    // "narrow content" test also catches the title, character sheet and inventory.
+    int structural_loading = w >= AC_SW * 72 / 100 && w <= AC_SW * 86 / 100 &&
+                             y0 <= 1 && y1 >= AC_SH - 2 &&
+                             left_margin >= 2 && right_margin >= 2 &&
+                             abs(left_margin - right_margin) <= 2 &&
+                             content_aspect >= 1.68 && content_aspect <= 1.88;
+    if (!structural_loading) return;
     g_ac_crop[0] = (int)(x0 * sx); g_ac_crop[2] = (int)(w * sx);
-    g_ac_crop[1] = (int)(y0 * sy); g_ac_crop[3] = (int)((y1 - y0 + 1) * sy);
+    g_ac_crop[1] = (int)(y0 * sy); g_ac_crop[3] = (int)(content_h * sy);
     if (g_ac_crop[2] < 64 || g_ac_crop[3] < 64) return;
     int ch = g_ac_crop[3], cw = (int)lround(ch * 16.0 / 9.0);
     if (cw < 64 || cw > (int)src.width) return;
     g_ac_crop[0] = ((int)src.width - cw) / 2; g_ac_crop[1] = 0; g_ac_crop[2] = cw; g_ac_crop[3] = ch;
     g_ac_have = g_ac_hold = 1;
-    MLOG("出图自动裁切：内容占宽 %d/%d → 源矩形 %d,%d %dx%d（原纹理 %lux%lu）", w, AC_SW, g_ac_crop[0], g_ac_crop[1], g_ac_crop[2], g_ac_crop[3], (unsigned long)src.width, (unsigned long)src.height);
+    MLOG("出图自动裁切：内容 %d..%d x %d..%d（宽 %d/%d，比例 %.3f）→ 源矩形 %d,%d %dx%d（原纹理 %lux%lu）",
+         x0, x1, y0, y1, w, AC_SW, content_aspect, g_ac_crop[0], g_ac_crop[1], g_ac_crop[2], g_ac_crop[3],
+         (unsigned long)src.width, (unsigned long)src.height);
 }
 static pthread_mutex_t g_ac_done_mu = PTHREAD_MUTEX_INITIALIZER;
 static void auto_crop_done(id<MTLTexture> src, id<MTLBuffer> buf, int slot) {

@@ -266,18 +266,15 @@ static void scale3d_tick(void) {
 // Is this address range actually mapped in our task? The graphics globals live on the game's own heap, not in an NVN pool, so the pool check that mtl_addr does
 // rejected them (both candidates were reported "not in a known pool"); a region query is the honest test, and it keeps a wrong pointer from faulting.
 static int dm_addr_mapped(uint64_t a, uint64_t n) {
-    if (!a) return 0;
-    vm_address_t addr = (vm_address_t)a; vm_size_t size = 0;
-    vm_region_basic_info_data_64_t info; mach_port_t obj = MACH_PORT_NULL;
-    mach_msg_type_number_t cnt = VM_REGION_BASIC_INFO_COUNT_64;
-    if (vm_region_64(mach_task_self(), &addr, &size, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&info, &cnt, &obj) != KERN_SUCCESS) return 0;
-    if (obj != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), obj);
-    return addr <= a && a + n <= addr + size;
+    if (!a || a < 0x100000000ull || (a & 3) || n > 0x1000) return 0;
+    uint8_t probe[0x1000]; vm_size_t got = 0;
+    return vm_read_overwrite(mach_task_self(), (vm_address_t)a, (vm_size_t)n, (vm_address_t)probe, &got) == KERN_SUCCESS && got == n;
 }
 typedef struct { const char *what; uint32_t *w[4], *h[4]; int nw, nh; float *aspect; } d3_res_site;
 static d3_res_site g_res[8]; static int g_nres;
-static int d3_ptr_ok(module_t *m, uintptr_t a) {   // a pointer the game stored: outside the image, and the block we are about to read is mapped
-    if (!a || (a >= (uintptr_t)m->base && a < (uintptr_t)m->base + m->size)) return 0;
+static uint32_t *g_d3_ui_width, *g_d3_ui_height;
+static int d3_ptr_ok(module_t *m, uintptr_t a) {   // Guest BSS lives inside the main image: test readability, not whether the pointer is outside the image.
+    (void)m;
     return dm_addr_mapped(a, 0x60);
 }
 // Collect every slot in the candidate block that holds the size being rendered at right now (Globals keeps the device size and the reduced size as two adjacent
@@ -296,13 +293,15 @@ static void d3_add_site(const char *what, uint8_t *p, uint32_t w, uint32_t h, in
     LOG("D3 显示尺寸：%s 有 %d 个宽槽 / %d 个高槽（宽高比 %s）", what, s->nw, s->nh, s->aspect ? "有" : "无");
 }
 void dm_d3_res_tick(uint32_t w, uint32_t h) {
-    static int init; static module_t *main; static uint32_t want_w, want_h; static int notes, nudges;
+    static int init; static module_t *main; static uint32_t want_w, want_h, want_ui_w, want_ui_h; static int notes, nudges;
     if (!init) {
         init = 1;
         const char *e = getenv("DM_D3_RES");
         if (e && (!strcmp(e, "0") || !strcmp(e, "off"))) { LOG("D3 显示尺寸：DM_D3_RES=%s，用游戏自己的", e); return; }
         if (e) { unsigned a, b; if (sscanf(e, "%ux%u", &a, &b) == 2 && a >= 640 && b >= 360) { want_w = a; want_h = b; } }
         if (!want_w) { want_w = 1776; want_h = 816; }
+        e = getenv("DM_D3_UI");
+        if (e && sscanf(e, "%ux%u", &want_ui_w, &want_ui_h) == 2 && (want_ui_w < 640 || want_ui_h < 360)) want_ui_w = want_ui_h = 0;
         for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) main = &g_mod[i];
         if (!main || strcmp(main->build_id, "2607a74f5df7754cc0357b5df7e49693")) {
             LOG("D3 显示尺寸：main 构建 %s 不是 D3 v1441792，不改（地址只对这一版有效）", main && main->build_id[0] ? main->build_id : "（产物无构建号）"); main = NULL; }
@@ -322,6 +321,19 @@ void dm_d3_res_tick(uint32_t w, uint32_t h) {
         if (d3_ptr_ok(main, g2)) {
             uint8_t *p = (uint8_t *)g2;
             uint64_t q[8]; memcpy(q, p + 0x224, sizeof q);
+            if (*(uint32_t *)(p + 0x244) == w && *(uint32_t *)(p + 0x248) == h) {
+                g_d3_ui_width = (uint32_t *)(p + 0x23c);
+                g_d3_ui_height = (uint32_t *)(p + 0x240);
+            }
+            LOG("D3 显示尺寸：main+0x1150470 → %p，显示模式 flags/mode=%08x/%08x win=(%d,%d) %dx%d UI=%ux%u render=%ux%u refresh/depth=%u/%u MSAA=%u aspect=%.6f",
+                (void *)g2,
+                *(uint32_t *)(p + 0x224), *(uint32_t *)(p + 0x228),
+                *(int32_t *)(p + 0x22c), *(int32_t *)(p + 0x230),
+                *(int32_t *)(p + 0x234), *(int32_t *)(p + 0x238),
+                *(uint32_t *)(p + 0x23c), *(uint32_t *)(p + 0x240),
+                *(uint32_t *)(p + 0x244), *(uint32_t *)(p + 0x248),
+                *(uint32_t *)(p + 0x24c), *(uint32_t *)(p + 0x250),
+                *(uint32_t *)(p + 0x254), *(float *)(p + 0x258));
             LOG("D3 显示尺寸：main+0x1150470 → %p，出图尺寸区 %#llx %#llx %#llx %#llx %#llx %#llx %#llx %#llx", (void *)g2,
                 (unsigned long long)q[0], (unsigned long long)q[1], (unsigned long long)q[2], (unsigned long long)q[3],
                 (unsigned long long)q[4], (unsigned long long)q[5], (unsigned long long)q[6], (unsigned long long)q[7]);
@@ -333,6 +345,10 @@ void dm_d3_res_tick(uint32_t w, uint32_t h) {
         for (int k = 0; k < g_res[i].nw; k++) if (*g_res[i].w[k] != want_w) { dm_guest_write_prepare(g_res[i].w[k], 4); *g_res[i].w[k] = want_w; }
         for (int k = 0; k < g_res[i].nh; k++) if (*g_res[i].h[k] != want_h) { dm_guest_write_prepare(g_res[i].h[k], 4); *g_res[i].h[k] = want_h; }
         if (g_res[i].aspect) { float a = (float)want_w / (float)want_h; if (*g_res[i].aspect != a) { dm_guest_write_prepare(g_res[i].aspect, 4); *g_res[i].aspect = a; } }
+    }
+    if (g_d3_ui_width && g_d3_ui_height && want_ui_w && want_ui_h) {
+        if (*g_d3_ui_width != want_ui_w) { dm_guest_write_prepare(g_d3_ui_width, 4); *g_d3_ui_width = want_ui_w; }
+        if (*g_d3_ui_height != want_ui_h) { dm_guest_write_prepare(g_d3_ui_height, 4); *g_d3_ui_height = want_ui_h; }
     }
     // The game rebuilds its display mode when the system says the performance configuration changed: ask for that once, and once more about three seconds in
     if (g_ntf_perfmode && (nudges == 0 || (nudges == 1 && dm_nvn_frame_count() > 180))) {
