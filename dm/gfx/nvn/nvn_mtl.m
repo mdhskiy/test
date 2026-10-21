@@ -3458,18 +3458,16 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
                 // DM_NVN_CBDUMP_KEY=shader key: only save for draws using that shader (any stage)
                 static const char *cbd, *cbk; static int cbd_init; if (!cbd_init) { cbd = getenv("DM_NVN_CBDUMP"); cbk = getenv("DM_NVN_CBDUMP_KEY"); cbd_init = 1; }
                 if (cbd && (!cbk || !strcmp(sh->key, cbk))) {
-                    char p[1024]; snprintf(p, sizeof p, "%s/F%llu_p%llu_st%d_cb%d_%llx_g.bin", cbd, (unsigned long long)atomic_load(&g_cur_frame), g_stat_pass, nvn_stage, reg, (unsigned long long)u->addr);
+                    char p[1024]; snprintf(p, sizeof p, "%s/F%llu_p%llu_st%d_cb%d_%llx.bin", cbd, (unsigned long long)atomic_load(&g_cur_frame), g_stat_pass, nvn_stage, reg, (unsigned long long)u->addr);
                     FILE *f = fopen(p, "wb"); if (f) { fwrite((const void *)u->addr, 1, u->size, f); fclose(f); } else RED_ONCE(41, "CBDUMP 写不出 %s", p);
-                    // the bytes this draw is really bound to (the deferred shadow), so the two can be compared per draw
-                    if (gpu == g_ubd_gpu && g_ubd_buf) {
-                        char q[1024]; snprintf(q, sizeof q, "%s/F%llu_p%llu_st%d_cb%d_%llx_b.bin", cbd, (unsigned long long)atomic_load(&g_cur_frame), g_stat_pass, nvn_stage, reg, (unsigned long long)u->addr);
-                        FILE *fb = fopen(q, "wb"); const uint8_t *bs = (const uint8_t *)[g_ubd_buf contents];
-                        if (fb) { if (bs) fwrite(bs + g_ubd_off, 1, u->size < g_ubd_off + u->size ? u->size : u->size, fb); fclose(fb); }
-                    }
                 }
             }
             slots[aid] = gpu;
             USE((__bridge id<MTLBuffer>)mb, MTLResourceUsageRead);
+            // With the deferred path the draw reads a shadow block (the ring or the arena), not the guest buffer: declare that one as read too.
+            // Metal 4 argument tables only guarantee the contents of resources the submission declares as used; the undeclared shadow read back
+            // undefined bytes, so a HUD element picked up another element's matrix and texture (a solid rectangle over the lantern, a new one each frame).
+            if (g_ubd_buf && gpu == g_ubd_gpu) USE(g_ubd_buf, MTLResourceUsageRead);
         } else if (b->kind == NVN_RB_SAMP || b->kind == NVN_RB_SAMPT || b->kind == NVN_RB_SAMPU) {   // SAMPT: the sampler part of a combined handle (texture ID | sampler ID << 20); SAMPU: the same, with the handle in a uniform buffer
             int sid = b->kind == NVN_RB_SAMPU ? (int)(ubo_handle(nvn_stage, reg, b->off) >> 20) :
                       reg < 128 ? (int)((b->kind == NVN_RB_SAMPT ? S.tex[nvn_stage][reg] : S.samp[nvn_stage][reg]) >> 20) : 0;
