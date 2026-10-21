@@ -6847,9 +6847,10 @@ static void auto_crop_done(id<MTLTexture> src, id<MTLBuffer> buf) {
         const uint8_t *q = p + ((size_t)y * AC_SW + x) * 4;
         if (q[0] > 12 || q[1] > 12 || q[2] > 12) { if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
     }
-    g_ac_have = 0;
-    if (x1 < 0) return;
+    static int ac_log; g_ac_have = 0;
+    if (x1 < 0) { if (ac_log++ % 8 == 0) MLOG("出图内容检测：整帧全黑"); return; }
     int w = x1 - x0 + 1;
+    if (ac_log++ % 8 == 0) MLOG("出图内容检测：内容 %d..%d / %d 宽（占 %d%%）%s", x0, x1, AC_SW, w * 100 / AC_SW, w >= AC_SW * 94 / 100 ? "整帧，不裁" : "偏窄");
     if (w >= AC_SW * 94 / 100) return;                                  // 内容到边：不裁
     if (x0 < AC_SW * 2 / 100 || AC_SW - 1 - x1 < AC_SW * 2 / 100) return;   // 两侧都得是黑边才算加载界面
     double sx = (double)src.width / AC_SW, sy = (double)src.height / AC_SH;
