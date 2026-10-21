@@ -465,10 +465,11 @@ static void *ctl_new(void) { uint8_t *c = calloc(1, 0x880 + 16); if (c) *(uint32
 static uint8_t *ctl_data(void *c) { return c && *(const uint32_t *)c == CTL_MAGIC ? (uint8_t *)c + 16 : NULL; }
 static void ctl_free(void *c) { if (c) { *(uint32_t *)c = 0; free(c); } }
 static pthread_mutex_t g_pk_mu = PTHREAD_MUTEX_INITIALIZER; static CFMutableDictionaryRef g_pk;   // a dedicated table (keys not shared with other side tables)
+static const void *pk_key(const prog_t *p) { return (const void *)(uintptr_t)p->serial; }
 static prog_keys_t *pk_get_locked(const prog_t *p, int make) {
     if (!g_pk) g_pk = CFDictionaryCreateMutable(NULL, 0, NULL, NULL);
-    prog_keys_t *k = (prog_keys_t *)CFDictionaryGetValue(g_pk, p);
-    if (!k && make) { k = calloc(1, sizeof *k); k->magic = PK_MAGIC; CFDictionarySetValue(g_pk, p, k); }
+    prog_keys_t *k = (prog_keys_t *)CFDictionaryGetValue(g_pk, pk_key(p));
+    if (!k && make) { k = calloc(1, sizeof *k); k->magic = PK_MAGIC; CFDictionarySetValue(g_pk, pk_key(p), k); }
     else if (k && (k->magic != PK_MAGIC || k->serial != p->serial)) {
         if (k->magic == PK_MAGIC) for (int i = 0; i < 6; i++) ctl_free(k->ctl[i]);
         memset(k->key, 0, sizeof k->key); memset(k->ctl, 0, sizeof k->ctl); k->ok = 0; k->magic = PK_MAGIC;
@@ -478,9 +479,10 @@ static prog_keys_t *pk_get_locked(const prog_t *p, int make) {
 }
 static void pk_drop(const void *p) {
     pthread_mutex_lock(&g_pk_mu);
-    prog_keys_t *k = g_pk ? (prog_keys_t *)CFDictionaryGetValue(g_pk, p) : NULL;
+    const void *key = pk_key(p);
+    prog_keys_t *k = g_pk ? (prog_keys_t *)CFDictionaryGetValue(g_pk, key) : NULL;
     if (k && k->serial == ((const prog_t *)p)->serial) {
-        for (int i = 0; i < 6; i++) ctl_free(k->ctl[i]); k->magic = 0; CFDictionaryRemoveValue(g_pk, p); free(k);
+        for (int i = 0; i < 6; i++) ctl_free(k->ctl[i]); k->magic = 0; CFDictionaryRemoveValue(g_pk, key); free(k);
     }
     pthread_mutex_unlock(&g_pk_mu);
 }
@@ -811,7 +813,8 @@ NVN(nvnCommandBufferSetViewports, void, NVNcommandBuffer *c, int first, int n, c
 NVN(nvnCommandBufferSetScissor, void, NVNcommandBuffer *c, int x, int y, int w, int h) { *REC(c, OP_SCISSOR, p_scissor) = (p_scissor){x, y, w, h}; }
 NVN(nvnCommandBufferSetDepthRange, void, NVNcommandBuffer *c, float n, float f) { *REC(c, OP_DEPTH_RANGE, p_depth_range) = (p_depth_range){n, f}; }
 NVN(nvnCommandBufferBindProgram, void, NVNcommandBuffer *c, const NVNprogram *p, int stages) {
-    *REC(c, OP_BIND_PROGRAM, p_bind_program) = (p_bind_program){(const prog_t *)p, stages};
+    p_bind_program *r = REC(c, OP_BIND_PROGRAM, p_bind_program);
+    r->prog = *(const prog_t *)p; r->stages = stages;
 }
 static void bind_state(NVNcommandBuffer *c, int kind, const void *st, size_t n) { p_bind_state *r = REC(c, OP_BIND_STATE, p_bind_state); r->kind = kind; memcpy(r->bytes, st, n); }
 NVN(nvnCommandBufferBindBlendState, void, NVNcommandBuffer *c, const NVNblendState *st) { bind_state(c, 0, st, sizeof(blend_st)); }

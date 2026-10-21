@@ -111,7 +111,9 @@ typedef struct { int32_t first, n; float v[16][6]; } p_viewports;          // x,
 typedef struct { int32_t x, y, w, h; } p_scissor;
 typedef struct { float n, f; } p_depth_range;
 typedef struct { int32_t on; } p_depth_clamp;   // SetDepthClamp: depth outside [near, far] is clamped instead of clipped (Metal's depth clip mode)
-typedef struct { const prog_t *prog; int32_t stages; } p_bind_program;
+// Snapshot the program at recording time: NVN snapshots bind state, and D3 reuses the guest NVNprogram address before the
+// command buffer is submitted. Keeping only the pointer let replay read an unrelated matrix as nstage and walk past sd[].
+typedef struct { prog_t prog; int32_t stages; } p_bind_program;
 typedef struct { int32_t kind; uint8_t bytes[0x18]; } p_bind_state;      // kind: 0 blend 1 color 2 chmask 3 ms 4 poly 5 ds
 typedef struct { int32_t first, n; uint32_t st[16]; } p_bind_vattr;
 typedef struct { int32_t first, n; vs_st st[16]; } p_bind_vstream;
