@@ -714,11 +714,13 @@ static int ubd_covers(uint64_t lo, uint64_t hi) {
 // GPU address of the shadow of uniform range [lo, hi) (ubd_covers holds): one deferred update holding all of it and suitably aligned is used in place; otherwise the updates are laid into the arena in order
 // DM_NVN_UBD_ARENA=1: never hand a draw the ring address in place, always lay the data into the arena (diagnostic for the in-place path)
 static int ubd_arena_only(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_UBD_ARENA"); v = e && !strcmp(e, "1"); if (v) MLOG("DM_NVN_UBD_ARENA=1：推迟数据一律经 arena 拷贝，不再就地引用环地址"); } return v; }
+// The block/offset ubd_shadow() last handed out (diagnostic: DM_NVN_CBDUMP also saves the bytes the draw is really bound to, not just guest memory)
+static __unsafe_unretained id<MTLBuffer> g_ubd_buf; static size_t g_ubd_off; static uint64_t g_ubd_gpu;
 static uint64_t ubd_shadow(uint64_t lo, uint64_t hi) {
     if (!ubd_arena_only())
     for (int i = g_nubd - 1; i >= 0; i--) { const ubd_ent *e = &g_ubd[i];
         if (e->lo <= lo && hi <= e->hi) { int later = 0; for (int j = i + 1; j < g_nubd; j++) later |= lo < g_ubd[j].hi && g_ubd[j].lo < hi;
-            uint64_t g = e->gpu + (lo - e->lo); if (!later && !(g & 15)) return g; break; } }
+            uint64_t g = e->gpu + (lo - e->lo); if (!later && !(g & 15)) { g_ubd_gpu = g; g_ubd_buf = e->buf; g_ubd_off = e->off + (size_t)(lo - e->lo); return g; } break; } }
     id<MTLBuffer> ab; size_t o = arena_alloc((size_t)(hi - lo), &ab); uint8_t *d = (uint8_t *)ab.contents + o;
     // Start from the guest content: the caller also takes this path when the deferred entries cover only part of the binding, and the bytes they do not
     // cover must keep their pre-defer value (arena memory is uninitialised).
@@ -726,6 +728,7 @@ static uint64_t ubd_shadow(uint64_t lo, uint64_t hi) {
     if (mtl_addr(lo, (size_t)(hi - lo), &gb, &gof)) { const uint8_t *gs = (const uint8_t *)[(__bridge id<MTLBuffer>)gb contents]; if (gs) memcpy(d, gs + gof, (size_t)(hi - lo)); }
     for (int i = 0; i < g_nubd; i++) { const ubd_ent *e = &g_ubd[i]; uint64_t a = e->lo > lo ? e->lo : lo, b = e->hi < hi ? e->hi : hi;
         if (a < b) memcpy(d + (a - lo), (const uint8_t *)e->buf.contents + e->off + (a - e->lo), (size_t)(b - a)); }
+    g_ubd_gpu = ab.gpuAddress + o; g_ubd_buf = ab; g_ubd_off = o;
     return ab.gpuAddress + o;
 }
 // Encode the deferred copies in order (rp_end, once the pass has ended)
@@ -3455,8 +3458,14 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
                 // DM_NVN_CBDUMP_KEY=shader key: only save for draws using that shader (any stage)
                 static const char *cbd, *cbk; static int cbd_init; if (!cbd_init) { cbd = getenv("DM_NVN_CBDUMP"); cbk = getenv("DM_NVN_CBDUMP_KEY"); cbd_init = 1; }
                 if (cbd && (!cbk || !strcmp(sh->key, cbk))) {
-                    char p[1024]; snprintf(p, sizeof p, "%s/F%llu_p%llu_st%d_cb%d_%llx.bin", cbd, (unsigned long long)atomic_load(&g_cur_frame), g_stat_pass, nvn_stage, reg, (unsigned long long)u->addr);
+                    char p[1024]; snprintf(p, sizeof p, "%s/F%llu_p%llu_st%d_cb%d_%llx_g.bin", cbd, (unsigned long long)atomic_load(&g_cur_frame), g_stat_pass, nvn_stage, reg, (unsigned long long)u->addr);
                     FILE *f = fopen(p, "wb"); if (f) { fwrite((const void *)u->addr, 1, u->size, f); fclose(f); } else RED_ONCE(41, "CBDUMP 写不出 %s", p);
+                    // the bytes this draw is really bound to (the deferred shadow), so the two can be compared per draw
+                    if (gpu == g_ubd_gpu && g_ubd_buf) {
+                        char q[1024]; snprintf(q, sizeof q, "%s/F%llu_p%llu_st%d_cb%d_%llx_b.bin", cbd, (unsigned long long)atomic_load(&g_cur_frame), g_stat_pass, nvn_stage, reg, (unsigned long long)u->addr);
+                        FILE *fb = fopen(q, "wb"); const uint8_t *bs = (const uint8_t *)[g_ubd_buf contents];
+                        if (fb) { if (bs) fwrite(bs + g_ubd_off, 1, u->size < g_ubd_off + u->size ? u->size : u->size, fb); fclose(fb); }
+                    }
                 }
             }
             slots[aid] = gpu;
