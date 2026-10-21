@@ -49,6 +49,12 @@ shader_note	Diablo III: Eternal Collection shaders (provisional profile)
 tex_flush_upload	on
 tex_dirty_upload	on
 
+# The soft-edge additive light shader samples the screen through a UBO that is rewritten once per light. On the
+# deferred-uniform path its 1464-vertex draw intermittently used stale screen-transform data and copied a wrong screen
+# rectangle over the lantern. End the pass before this single draw so its uniforms land first; the rest of the frame
+# keeps deferred uniforms, 60 fps and the normal glow.
+ub_flush_fs	af93a844f4a988da
+
 # build trigger note (no functional change)
 
 # ---- Conditional rendering ----

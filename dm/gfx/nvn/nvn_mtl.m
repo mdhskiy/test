@@ -5319,16 +5319,38 @@ static void wide_run(const p_draw_idx *di) {
     if (!g_wide_runs++) MLOG("8 位索引 GPU 展开：首次 %d 个绘制（索引本提交里有 GPU 侧写入，在渲染通道前由计算展开成 16 位）", n);
     else if (g_wide_runs % 3600 == 0) MLOG("8 位索引 GPU 展开：%llu 次 %llu 个绘制，其中切开渲染通道 %llu 次", (unsigned long long)g_wide_runs, (unsigned long long)g_wide_draws, (unsigned long long)g_wide_splits);
 }
+static int ubd_flush_shader(const char *key) {
+    static char keys[16][20]; static int nk = -1;
+    if (nk < 0) {
+        const char *s = getenv("DM_NVN_UB_FLUSH_FS");
+        if (!s || !*s) s = DM_GAME_UB_FLUSH_FS;
+        nk = 0;
+        while (s && *s && nk < 16) {
+            while (*s == ' ') s++;
+            size_t n = strcspn(s, " ");
+            if (!n) break;
+            if (n > 19) n = 19;
+            memcpy(keys[nk], s, n); keys[nk++][n] = 0;
+            s += n;
+        }
+        if (nk) MLOG("通道内 uniform 更新命中时先落地并切通道的片元着色器：%s", keys[0]);
+    }
+    for (int i = 0; key && i < nk; i++) if (!strncmp(key, keys[i], strlen(keys[i]))) return 1;
+    return 0;
+}
 // Whether this draw needs more from the inline updates deferred in the open pass than the uniform shadows give (see mtl_sub_update): a uniform binding they cover only in part, a bindless
-// handle in such a part, or their data read as vertices, indices, indirect arguments or a storage buffer. Then the pass ends first and the updates land before the draw, as before
+// handle in such a part, their data read as vertices, indices, indirect arguments or a storage buffer, or a profile-listed shader whose
+// screen-space transform must not observe deferred data. Then the pass ends first and the updates land before the draw, as before.
 static int ubd_conflict(NvProg *pr, const p_draw *dw, const p_draw_idx *di) {
     for (int s_ = 0; s_ < 16; s_++) if (S.vbuf[s_].address && ubd_hits(S.vbuf[s_].address, S.vbuf[s_].address + S.vbuf[s_].size)) return 1;
     if (di && di->ibuf && ubd_hits(di->ibuf, di->ibuf + (uint64_t)di->count * 4)) return 1;
     uint64_t ind = dw ? dw->ind : di ? di->ind : 0; if (ind && ubd_hits(ind, ind + 32)) return 1;
     for (int st = 0; pr && st < 2; st++) { __unsafe_unretained NvShader *sh = pr->sh[st]; if (!sh) continue;   // the stages encode_args binds (vertex, fragment)
+        int flush_shader = st == 1 && ubd_flush_shader(sh->key);
         for (int i = 0; i < sh->rf.nb; i++) { const nvn_rbind *b = &sh->rf.b[i]; if (b->reg >= 16) continue;
             const p_bind_buf *u = b->kind == NVN_RB_SBUFP ? &S.ssbo[st][b->reg] : &S.ubo[st][b->reg];
             if (!u->addr) continue;
+            if (flush_shader && ubd_hits(u->addr, u->addr + (u->size ? u->size : 1))) return 1;
             if (b->kind == NVN_RB_CBUF) { if (ubd_hits(u->addr, u->addr + u->size) && !ubd_covers(u->addr, u->addr + u->size)) return 1; }
             else if (b->kind == NVN_RB_TEXU || b->kind == NVN_RB_SAMPU) { uint64_t h = u->addr + b->off; if (ubd_hits(h, h + 4) && !ubd_covers(h, h + 4)) return 1; }
             else if (b->kind == NVN_RB_SBUFP || b->kind == NVN_RB_UBOP) { if (ubd_hits(u->addr, u->addr + (u->size ? u->size : 1))) return 1; } } }
