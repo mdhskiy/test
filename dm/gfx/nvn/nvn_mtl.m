@@ -3400,11 +3400,15 @@ static uint32_t ubo_handle(int stage, int reg, int off) {
     if (stage < 0 || stage >= 6 || reg < 0 || reg >= 16) return 0;
     const p_bind_buf *u = &S.ubo[stage][reg];
     if (!u->addr || (uint64_t)off + 4 > u->size) return 0;
-    if (g_nubd && ubd_hits(u->addr + off, u->addr + off + 4) && ubd_covers(u->addr + off, u->addr + off + 4)) { uint32_t h; ubd_read(u->addr + off, 4, &h); return h; }   // written by an inline update deferred in this pass
     if (pend_hits(u->addr + off, 4)) RED_ONCE(47, "无绑定句柄所在的 uniform 缓冲（阶段 %d 槽 %d +%#x）本提交里有 GPU 侧写入：读的是当前值", stage, reg, off);
     void *mb; uint64_t mo; const uint8_t *base;
     if (!mtl_addr(u->addr + off, 4, &mb, &mo) || !(base = [(__bridge id<MTLBuffer>)mb contents])) return 0;
-    uint32_t h; memcpy(&h, base + mo, 4); return h;
+    uint32_t h; memcpy(&h, base + mo, 4);
+    // Overlay the writes deferred in this pass on top of the memory value (later entries win) instead of requiring a full cover: a partial overlap used
+    // to fall back to guest memory, which still holds the pre-defer content, so the handle named the wrong texture -- D3's HUD drew one element with
+    // another element's texture and matrix (a solid rectangle over the lantern, a new one each frame).
+    if (g_nubd && ubd_hits(u->addr + off, u->addr + off + 4)) ubd_read(u->addr + off, 4, &h);
+    return h;
 }
 static uint32_t g_dispatch_dim[3];   // the current dispatch's workgroup counts (driver segment c0 + 0x200 for compute)
 static __unsafe_unretained id<MTLBuffer> g_c0_dim_buf; static size_t g_c0_dim_off;   // where encode_args put them for this dispatch (nil: the shader reads no c0); an indirect dispatch copies its GPU-written counts there
