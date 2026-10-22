@@ -31,6 +31,26 @@ int main(void) {
     feed(&c, 60 * 3, 0, 0); assert(c.level == 1);
     d3_scale_step(&c, 0, clock_ns, 3); assert(c.level == 3);
 
+    c = (d3_scale_ctl){.level = 3};
+    feed(&c, 60 * 150 + 60, 0, 2);
+    assert(c.level == 3 && c.good == 0); // No 70% -> 80% recovery while serious.
+    feed(&c, 60 * 59, 0, 1); assert(c.level == 3); // Partial hot window grants no credit.
+    feed(&c, 60, 0, 1); assert(c.level == 2);
+
+    c = (d3_scale_ctl){.level = 3};
+    feed(&c, 60 * 58, 0, 0); assert(c.good == 29);
+    d3_scale_step(&c, 0, clock_ns, 2); assert(c.good == 0); // Heat clears prior credit even without samples.
+    feed(&c, 60 * 59, 0, 0); assert(c.level == 3);
+    feed(&c, 60, 0, 0); assert(c.level == 2);
+
+    c = (d3_scale_ctl){.level = 3, .need_good = 60};
+    feed(&c, 60 * 150, 0, 2); assert(c.level == 3 && c.good == 0);
+    feed(&c, 60 * 119, 0, -1); assert(c.level == 3); // Unknown desktop thermal state allows normal recovery.
+    feed(&c, 60, 0, -1); assert(c.level == 2); // Failed recovery still needs 120s after cooling.
+
+    c = (d3_scale_ctl){.level = 2};
+    feed(&c, 120, 10, 2); assert(c.level == 3); // Thermal recovery gate does not block load-driven descent.
+
     c = (d3_scale_ctl){0};
     feed(&c, 600, 60, 0); assert(c.level == 1); // Sparse sustained misses: ten-second criterion.
     c = (d3_scale_ctl){0};

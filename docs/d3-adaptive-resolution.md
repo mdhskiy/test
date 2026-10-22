@@ -12,6 +12,8 @@ state limits scale to 0.80, critical to 0.70. It lowers one level if more than
 ten seconds. A miss is a discarded presentation or an interval over 25 ms.
 After a change it waits three seconds. Recovery requires 60 clean seconds;
 a relapse within 15 seconds extends the next recovery to 120 clean seconds.
+Serious or critical thermal state prohibits all recovery, including 70% to
+80%. Cooling starts a fresh clean recovery period; hot frames grant no credit.
 These are conservative policy choices, not thresholds validated in a dense
 greater rift. CPU simulation and loading stalls are not fixed by resolution.
 

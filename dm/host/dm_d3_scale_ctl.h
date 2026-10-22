@@ -7,7 +7,7 @@
 
 #define D3S_SEC UINT64_C(1000000000)
 typedef struct {
-    int level, good, need_good, nw, reason;
+    int level, good, need_good, nw, reason, hot;
     uint64_t hold_until, last_up;
     double ms, rate2, rate10;
     unsigned n, drops;
@@ -23,10 +23,17 @@ static inline void d3_scale_hold(d3_scale_ctl *c, uint64_t now, uint64_t duratio
 // Serious heat caps at 80%, critical at 70%; actual drops can lower further.
 // Two-second windows: >5% drops in one window or >1% in ten seconds lowers
 // one level. Three seconds settle after a change. Recovery requires 60 clean
-// seconds; a failed recovery extends that to 120 seconds. Temperature caps
-// also prevent recovery, including when presentation samples are unavailable.
+// seconds; a failed recovery extends that to 120 seconds. Serious/critical
+// heat prohibits all recovery. Cooling starts a fresh clean recovery period.
 static inline int d3_scale_step(d3_scale_ctl *c, double iv, uint64_t now, int thermal) {
     c->reason = 0;
+    if (thermal >= 2) c->good = 0;
+    else if (c->hot) {
+        // Do not count a partial hot window toward recovery after cooling.
+        // Retain completed miss windows so cooling cannot hide load pressure.
+        c->ms = 0; c->n = c->drops = 0;
+    }
+    c->hot = thermal >= 2;
     int floor = thermal >= 3 ? 3 : thermal == 2 ? 2 : 0;
     if (c->level < floor) {
         c->level = floor; c->reason = 1;
@@ -47,7 +54,7 @@ static inline int d3_scale_step(d3_scale_ctl *c, double iv, uint64_t now, int th
     if (c->level < 3 && (c->rate2 > .05 || (c->nw == 5 && c->rate10 > .01))) {
         if (c->last_up && now - c->last_up < 15 * D3S_SEC) c->need_good = 60;
         c->level++; c->reason = 2; d3_scale_hold(c, now, 3 * D3S_SEC);
-    } else if (!clean || c->level <= floor) c->good = 0;
+    } else if (c->hot || !clean || c->level <= floor) c->good = 0;
     else if (++c->good >= (c->need_good ? c->need_good : 30) && c->level) {
         c->level--; c->last_up = now; c->need_good = 0; c->reason = 3;
         d3_scale_hold(c, now, 3 * D3S_SEC);
