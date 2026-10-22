@@ -222,6 +222,16 @@ if RULE_RUN:
     assert BUILD_ID == RULE_BUILD, f'Run规则构建号不符 {BUILD_ID}'
     RULE_ORIG_SHA = hashlib.sha256(IMG).hexdigest()
 cuts = list(CUTS.get(BUILD_ID, []))
+# Optional offline D3 native-resolution candidate. Keep the normal package's
+# smaller heaps unchanged; this flag must be recorded in package provenance.
+if os.environ.get('DM_D3_NATIVE_HEAPS') == '1' and NAME == 'main':
+    assert BUILD_ID == '2607a74f5df7754cc0357b5df7e49693', 'D3 heap patch build mismatch'
+    for off, old, new, why in [
+        (0xa36c34, 0x52a2e813, 0x52a4a813, 'graphics persistent heap: 372 to 596 MiB'),
+        (0xe7770, 0x52a93813, 0x52ab3813, 'NVN heap: 1180 to 1436 MiB'),
+        (0xe77a0, 0x320503e3, 0x52a20003, 'largest NVN pool allocation: 128 to 256 MiB'),
+    ]:
+        cuts.append((off, struct.pack('<I', old).hex(), struct.pack('<I', new).hex(), 'D3 native-resolution candidate: ' + why, '仅宿主'))
 # The touchscreen rule domain by default also carries the host-private gates; the rule gate check can turn them off explicitly, keeping the same packaging entry point and rule domain.
 PRIVATE_GATES = os.environ.get("DM_PRIVATE_GATES", "1") != "0"
 PRIVATE_AIM = RULE_RUN and PRIVATE_GATES
