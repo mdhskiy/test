@@ -1419,6 +1419,7 @@ static uint64_t present_period(const win_t *o) {
     return hz > 0 ? (uint64_t)itv * 1000000000ull / (uint64_t)hz : 0;
 }
 int (*g_nvn_loadscreen_up)(void);   // host registration: whether the loading screen is up right now (filled in when diag.c subscribes to UI messages; null in graphics unit tests = no gate)
+extern void dm_d3_scale_present(double iv_ms) __attribute__((weak));
 NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
     (void)q; win_t *o = (win_t *)w; o->presents++;
     static uint64_t prev_in, prev_out, prev_pass, prev_draw;
@@ -1529,6 +1530,7 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
         g_pres_iv[g_presn++ % TWIN] = a_ < 0 ? -1 : (a_ > 0 && b_ > 0 ? (a_ - b_) * 1e3 : 0);
         { double iv_ = a_ < 0 ? -1 : (a_ > 0 && b_ > 0 ? (a_ - b_) * 1e3 : 0); mtl_ub_present(iv_); }   // same-process alternating measurement (DM_NVN_UB) tallies on-screen present intervals per phase; when off it is just one atomic read
         dm_perf_present(a_ < 0 ? -1 : (a_ > 0 && b_ > 0 ? (a_ - b_) * 1e3 : 0));   // on-screen present intervals are also kept in a separate ring; tsummary reports dropped frames every 300 frames (M1 criterion)
+        if (dm_d3_scale_present) dm_d3_scale_present(a_ < 0 ? -1 : (a_ > 0 && b_ > 0 ? (a_ - b_) * 1e3 : 0));
         if (a_ > 0) trow(f - 8, "@pres_at_ms", a_ * 1e3 - g_t0_ns / 1e6); }   // on-screen present time (ms since process start; presentedTime shares a time base with mach_absolute_time)
     if (f >= 8 && slow_on()) slow_emit(f - 8);
     prev_out = now_ns();

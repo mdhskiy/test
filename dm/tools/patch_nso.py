@@ -193,6 +193,9 @@ CUTS = {
 # ---- Registered observation gates: {NSO build ID: [(offset, number, original instruction word, reason)]}. Numbers match OBS_* in the host's hle.h;
 # the original instruction must be position independent (no PC-relative / branch / anything involving x18 or tpidr), asserted offline; when the host has no callback attached the gate block goes in and out once and returns ----
 OBS = {
+  '2607a74f5df7754cc0357b5df7e49693': [
+    (0x42d08, 21, 'f9400b48', 'D3 native variable-resolution update completed: x26 is the RWindow manager; apply presentation-driven scale before the next frame. Original ldr x8, [x26, #0x10]'),
+  ],
   # Metroid Dread 2.1.0 main: the movie player posts "link / unlink holders" requests into the dispatcher thread's request ring (main+0x222cc8) and goes on without waiting for them (after an unlink it frees the wrapper object and builds a new one in place).
   # On hardware the dispatcher thread (priority 30, core 0 only) preempts the main thread (priority 44, core 0) at once and finishes first; the host waits for the ring to empty after each post (hle_movie.c movie_ring_wait). The gates sit on the add x22, x22, #8 after the bl
   '646761f643afebb379edd5e6a5151af2': [

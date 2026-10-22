@@ -90,6 +90,8 @@ jobs:
           python3 dm/games/game.py header "$GAME" "dm/host/gen/$GAME/game_profile.h"
           make -C dm/host/tests build/t_oe GAME="$GAME"
           dm/host/tests/build/t_oe
+          clang -std=c11 -Wall -Wextra -Werror dm/host/tests/t_d3_scale.c -lm -o "$RUNNER_TEMP/t_d3_scale"
+          "$RUNNER_TEMP/t_d3_scale"
           clang -std=c11 -Wall -Wextra -Werror dm/gfx/tests/t_loading_art.c -lm -o "$RUNNER_TEMP/t_loading_art"
           "$RUNNER_TEMP/t_loading_art"
           clang -std=c11 -Wall -Wextra -Werror dm/gfx/tests/t_exit_guard.c -o "$RUNNER_TEMP/t_exit_guard"

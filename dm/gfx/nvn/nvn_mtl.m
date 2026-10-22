@@ -5425,6 +5425,12 @@ static int ubd_conflict(NvProg *pr, const p_draw *dw, const p_draw_idx *di) {
 // Identify their sampled asset, not screen colors or texture IDs that get reused.
 // The normal viewport cache restores the original viewport on the very next draw.
 static _Atomic uint64_t g_loading_art_frame;
+// Presentation timestamps arrive eight frames late. Exclude loading and its
+// trailing samples from adaptive resolution; do not mistake loading for GPU load.
+int mtl_d3_loading_recent(void) {
+    uint64_t f = atomic_load(&g_cur_frame), last = atomic_load(&g_loading_art_frame);
+    return last && f >= last && f - last <= 12;
+}
 static int loading_art_draw(NvProg *pr, const p_draw_idx *di, NSUInteger tw, NSUInteger th) {
     static int enabled = -1;
     if (enabled < 0) { const char *e = getenv("DM_LOADING_ART"); enabled = DM_GAME_LOADING_ART_COUNT && (!e || atoi(e) != 0); }
