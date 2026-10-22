@@ -20,7 +20,8 @@ int dm_custom_lang_explicit(void) { return 0; }
 int dm_ingame_now(void) { return 0; }
 void dm_uiscreen_res_reread(void) {}
 // Game resolution: whatever the front end gives (Mac window / iOS screen), without D2R's UI-screen rewriting
-uint64_t dm_game_res(int docked) { return front_game_res(docked); }
+extern uint64_t dm_d3_game_res(int docked);
+uint64_t dm_game_res(int docked) { uint64_t r = dm_d3_game_res(docked); return r ? r : front_game_res(docked); }
 int dm_screen_real(int *w, int *h) { *w = *h = 0; return 0; }
 void dm_ui_rect(int *x, int *y, int *w, int *h) { *x = *y = *w = *h = 0; }
 // svc #0x80.. host gates: only D2R's rewrite rules create them; they should not appear in this game's build output

@@ -273,6 +273,20 @@ static int dm_addr_mapped(uint64_t a, uint64_t n) {
     return vm_read_overwrite(mach_task_self(), (vm_address_t)a, (vm_size_t)n, (vm_address_t)probe, &got) == KERN_SUCCESS && got == n;
 }
 typedef struct { const char *what; uint32_t *w[4], *h[4]; int nw, nh; float *aspect; } d3_res_site;
+// The rewriter's KRES slots and the later display-state hook must agree. The
+// slots are consumed before allocation, so a resolution override really changes
+// the render targets instead of making the crop exceed the old swapchain.
+uint64_t dm_d3_game_res(int docked) {
+    if (!DM_GAME_D3_RES_BUILD[0]) return 0;
+    int match = 0;
+    for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main") && !strcmp(g_mod[i].build_id, DM_GAME_D3_RES_BUILD)) match = 1;
+    if (!match) return 0;
+    const char *e = getenv("DM_D3_RES");
+    if (e && (!strcmp(e, "0") || !strcmp(e, "off"))) return docked ? (900ull << 32) | 1600 : (720ull << 32) | 1280;
+    unsigned w = DM_GAME_D3_RES_W, h = DM_GAME_D3_RES_H, a, b; char tail;
+    if (e && sscanf(e, "%ux%u%c", &a, &b, &tail) == 2 && a >= 640 && b >= 360 && a <= 4096 && b <= 4096) { w = a; h = b; }
+    return (uint64_t)h << 32 | w;
+}
 static d3_res_site g_res[8]; static int g_nres;
 static uint32_t *g_d3_ui_width, *g_d3_ui_height;
 static int d3_ptr_ok(uintptr_t a, size_t n) { return dm_addr_mapped(a, n); }
@@ -297,8 +311,9 @@ void dm_d3_res_tick(uint32_t w, uint32_t h) {
         init = 1;
         const char *e = getenv("DM_D3_RES");
         if (e && (!strcmp(e, "0") || !strcmp(e, "off"))) { LOG("D3 显示尺寸：DM_D3_RES=%s，用游戏自己的", e); return; }
-        if (e) { unsigned a, b; char tail; if (sscanf(e, "%ux%u%c", &a, &b, &tail) == 2 && a >= 640 && b >= 360 && a <= 4096 && b <= 4096) { want_w = a; want_h = b; } }
-        if (!want_w) { want_w = 1776; want_h = 816; }
+        uint64_t requested = dm_d3_game_res(1);
+        if (!requested) return;
+        want_w = (uint32_t)requested; want_h = (uint32_t)(requested >> 32);
         e = getenv("DM_D3_UI");
         if (e) { char tail; if (sscanf(e, "%ux%u%c", &want_ui_w, &want_ui_h, &tail) != 2 || want_ui_w < 640 || want_ui_h < 360 || want_ui_w > 4096 || want_ui_h > 4096) want_ui_w = want_ui_h = 0; }
         for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) main = &g_mod[i];

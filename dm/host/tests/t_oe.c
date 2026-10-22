@@ -132,6 +132,12 @@ static void test_d3_display(void) {
     assert(base && globals && gfx);
     g_nmod = 1; strcpy(g_mod[0].name, "main"); strcpy(g_mod[0].build_id, "2607a74f5df7754cc0357b5df7e49693");
     g_mod[0].base = base; g_mod[0].size = 0x1150500;
+    setenv("DM_D3_RES", "2868x1320", 1);
+    CHECK(dm_d3_game_res(0) == ((1320ull << 32) | 2868) && dm_d3_game_res(1) == ((1320ull << 32) | 2868), "D3: initial allocation uses the same override in both modes");
+    setenv("DM_D3_RES", "off", 1);
+    CHECK(dm_d3_game_res(0) == ((720ull << 32) | 1280) && dm_d3_game_res(1) == ((900ull << 32) | 1600), "D3: off restores original mode sizes");
+    setenv("DM_D3_RES", "2868x1320junk", 1);
+    CHECK(dm_d3_game_res(1) == ((816ull << 32) | 1776), "D3: malformed override keeps the profile default");
     *(uintptr_t *)(base + 0x114c970) = (uintptr_t)globals;
     *(uintptr_t *)(base + 0x1150470) = (uintptr_t)(base + 0x1150460);
     *(uintptr_t *)(base + 0x1150460) = (uintptr_t)gfx;

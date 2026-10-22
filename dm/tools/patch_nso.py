@@ -58,6 +58,11 @@ CUTS = {
   'ff773e90972d544eb79406eaa65396d5': [
     (0x1cf9b0, 'e00317aa', 'e0124091', '资源堆尺寸：mov x0,x23 → add x0,x23,#0x4000（ExpHeap::create 的尺寸参数 +16 KB）'),
   ],
+  '2607a74f5df7754cc0357b5df7e49693': [
+    # Preserve the working D3 baseline's startup behavior: no microphone inputs
+    # are exposed by this host. This was formerly an unrecorded package patch.
+    (0xb168e4, '3b6e0594', 'e0031f2a', 'D3 startup ListAudioIns: return zero input devices', '仅宿主'),
+  ],
   'db0507f36b84200ac05f75d76ed5026f': [
     # (Placed in the base rewrite shared by all build outputs): game video memory allocator budget 260 MB → 512 MB
     (0x8524c4, '0808a2d2', '0800a4d2', '显存分配器初始化配置：mov x8,#0x10400000（260 MB）→ mov x8,#0x20000000（512 MB），随后 movk #0xa0,lsl48 与 str [sp,#0x238] 不变；'
@@ -965,7 +970,12 @@ if RULE_RUN and PRIVATE_GATES:
 # The two constant-building instructions at the original site are changed so that the first jumps to a parameter trampoline in the patch area and the second is a nop; the trampoline fetches the key page value indirectly and jumps back to just after the first (A+4): when A and B are not adjacent, the original instructions in between execute as usual
 # (it used to jump back to B+4; in the operation-mode notification handler 0xe10d5c/0xe10d60 that skipped adrp x19.. and another trampoline, and switching to handheld crashed immediately; structck ⑩ checks the trampoline exit).
 # xR must not be read or written between A and B (offline assertion: the instructions in between do not contain xR). The host supplies values according to the front end, Mac supplies the original constants → behavior unchanged ----
-PARAMS = {'db0507f36b84200ac05f75d76ed5026f': [
+PARAMS = {'2607a74f5df7754cc0357b5df7e49693': [
+    # Set the size before GFXNX64NVN allocates the swapchain and render targets.
+    # Changing only Globals after allocation changes the crop, not the textures.
+    (0xe7858, 'd280c808', 0xe7860, 'f2c07088', 8, 'KRES1', 'D3 initial docked render size'),
+    (0xe785c, 'd280a009', 0xe7864, 'f2c05a09', 9, 'KRES0', 'D3 initial handheld render size'),
+], 'db0507f36b84200ac05f75d76ed5026f': [
     (0xe12d8c, 'd280c813', 0xe12d90, 'f2c07093', 19, 'KRES1', '启动初始化：主机模式输出分辨率 1600x900（{u32 宽, u32 高} 打包）'),
     (0xe12e1c, 'd280a008', 0xe12e20, 'f2c05a08', 8, 'KRES0', '启动初始化：掌机模式输出分辨率 1280x720'),
     (0xe10d60, 'd280c818', 0xe10d80, 'f2c07098', 24, 'KRES1', '运行模式变化通知（0x1f）处理：主机模式 1600x900'),
