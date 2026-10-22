@@ -59,6 +59,19 @@ presentation misses within 30 frames before to 60 frames after each of the
 100/90/80/70/100% transitions. Misses elsewhere in that route still occurred;
 this is neither a dense-combat nor a universal 60 FPS guarantee.
 
+The installed v32 (host `7bfb8ef1188b`) passed loading, quit/cancel, inventory,
+and re-entry checks at 2040x940 with complete text. At 80%, the pass dump showed
+scene viewport 1632x752, quarter postprocess 408x188 and final output 2040x940.
+The final screenshot-free opening-route/attack run kept the same foreground
+process for approximately two minutes: 25 presentation windows reported zero
+misses and p99 16.67 ms. Whole-device gauge SystemLoad averaged 4.406 W
+(time-weighted 4.426 W), with a maximum sample of 5.349 W. Battery temperature
+was 36.59–37.50 C; brightness was 0.30. Charging changed from active to inactive,
+so neither thermal equilibrium nor a causal power-saving percentage follows.
+Scale fell to 80% as thermal state entered fair and remained there without
+recovery throughout the measurement. Final diagnostic options were removed
+and the application was relaunched. Dense greater-rift combat remains untested.
+
 ## Diagnostics
 
 - `DM_D3_DYN=0`: leave the native scale policy in control.
