@@ -25,17 +25,19 @@ int main(void) {
 
     c = (d3_scale_ctl){0};
     d3_scale_hold(&c, clock_ns, 10 * D3S_SEC);
-    d3_scale_step(&c, 0, clock_ns, 2); assert(c.level == 2); // Thermal protection during warmup/no readings.
-    feed(&c, 60 * 150, 0, 2); assert(c.level == 2 && c.good == 0);
+    d3_scale_step(&c, 0, clock_ns, 1); assert(c.level == 2); // Early protection during warmup/no readings.
+    feed(&c, 60 * 150, 0, 1); assert(c.level == 2 && c.good == 0);
     feed(&c, 60 * 59, 0, 0); assert(c.level == 2); // Cooling does not immediately raise.
     feed(&c, 60 * 3, 0, 0); assert(c.level == 1);
+    d3_scale_step(&c, 0, clock_ns, 2); assert(c.level == 3); // Serious need not wait for critical.
     d3_scale_step(&c, 0, clock_ns, 3); assert(c.level == 3);
 
     c = (d3_scale_ctl){.level = 3};
     feed(&c, 60 * 150 + 60, 0, 2);
     assert(c.level == 3 && c.good == 0); // No 70% -> 80% recovery while serious.
-    feed(&c, 60 * 59, 0, 1); assert(c.level == 3); // Partial hot window grants no credit.
-    feed(&c, 60, 0, 1); assert(c.level == 2);
+    feed(&c, 60 * 150 + 60, 0, 1); assert(c.level == 3 && c.good == 0); // Cooling to fair still blocks recovery.
+    feed(&c, 60 * 59, 0, 0); assert(c.level == 3); // Partial hot window grants no credit.
+    feed(&c, 60, 0, 0); assert(c.level == 2);
 
     c = (d3_scale_ctl){.level = 3};
     feed(&c, 60 * 58, 0, 0); assert(c.good == 29);
@@ -49,7 +51,7 @@ int main(void) {
     feed(&c, 60, 0, -1); assert(c.level == 2); // Failed recovery still needs 120s after cooling.
 
     c = (d3_scale_ctl){.level = 2};
-    feed(&c, 120, 10, 2); assert(c.level == 3); // Thermal recovery gate does not block load-driven descent.
+    feed(&c, 120, 10, 1); assert(c.level == 3); // Thermal recovery gate does not block load-driven descent.
 
     c = (d3_scale_ctl){0};
     feed(&c, 600, 60, 0); assert(c.level == 1); // Sparse sustained misses: ten-second criterion.

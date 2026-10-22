@@ -43,7 +43,7 @@ static void d3_scale_init(void) {
         }
         free(copy);
     }
-    LOG("D3 adaptive scale: %s; native scene scale 1.00/0.90/0.80/0.70, thermal caps 0.80/0.70, fixed=%.2f script=%d",
+    LOG("D3 adaptive scale: %s; native scene scale 1.00/0.90/0.80/0.70, thermal fair/serious caps 0.80/0.70, fixed=%.2f script=%d",
         g_d3_on ? "on" : "off", g_d3_fixed, g_d3_script_n);
     atomic_store(&g_d3_ready, 1);
 }

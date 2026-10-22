@@ -6,14 +6,16 @@ does not resize the output, reallocate textures, change operation mode, or
 change shaders. A 2346x1080 output is the ceiling, not a claim that every 3D
 frame is rendered at that resolution or at the phone's native panel size.
 
-The policy uses linear scale levels 1.00, 0.90, 0.80 and 0.70. Serious thermal
-state limits scale to 0.80, critical to 0.70. It lowers one level if more than
+The policy uses linear scale levels 1.00, 0.90, 0.80 and 0.70. Fair thermal
+state limits scale to 0.80, serious or critical to 0.70. It lowers one level if more than
 5% of presentations miss in a two-second window, or more than 1% miss over
 ten seconds. A miss is a discarded presentation or an interval over 25 ms.
 After a change it waits three seconds. Recovery requires 60 clean seconds;
 a relapse within 15 seconds extends the next recovery to 120 clean seconds.
-Serious or critical thermal state prohibits all recovery, including 70% to
-80%. Cooling starts a fresh clean recovery period; hot frames grant no credit.
+Any reported thermal pressure prohibits recovery, including 70% to 80%.
+Returning to nominal starts a fresh clean period; hot frames grant no credit.
+This acts before the serious state that was already uncomfortably hot in
+device testing; the OS states are coarse and do not guarantee a surface temperature.
 These are conservative policy choices, not thresholds validated in a dense
 greater rift. CPU simulation and loading stalls are not fixed by resolution.
 
