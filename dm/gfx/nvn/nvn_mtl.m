@@ -72,6 +72,11 @@ static id<MTL4ArgumentTable> g_vt, g_ft, g_ct, g_up_ct;
 static int g_vbuf_cache = 1;
 static uint64_t g_vt_addr[31]; static uint32_t g_vt_valid;
 static uint64_t g_vbuf_set, g_vbuf_skip;
+// Fragment arguments have the same lifetime. enc_r_args is their only writer;
+// retaining an identical address does not cache or suppress buffer updates.
+static int g_fbuf_cache = 1;
+static uint64_t g_ft_addr[31]; static uint32_t g_ft_valid;
+static uint64_t g_fbuf_set, g_fbuf_skip;
 static id<MTL4ArgumentTable> g_present_args;
 static id<MTLBuffer> g_present_uv[3];
 int g_bloom_q = -1;   // Bloom 1/4 starting point (non-static: real-device same-process alternation sets it to 0 / 1 directly)
@@ -278,6 +283,7 @@ static void udc_selftest(void) {
 void mtl_init(void) {
     if (g_dev) return;
     const char *vbc = getenv("DM_NVN_VBUF_CACHE"); g_vbuf_cache = !(vbc && !strcmp(vbc, "0"));
+    const char *fbc = getenv("DM_NVN_FBUF_CACHE"); g_fbuf_cache = !(fbc && !strcmp(fbc, "0"));
     const char *link = getenv("DM_PRESENT_LINK");
     g_dm_present_link = link ? atoi(link) : 1; if (g_dm_present_link < 0 || g_dm_present_link > 2) g_dm_present_link = 1;   // Default 1 (real-device same-process alternation: when load exceeds one display-link period, long frames 15% → 0 and frame intervals even out; no difference from 0 at a steady 60); DM_PRESENT_LINK=0 turns it off   // 1 = present on every tick of a 60 Hz display link; 2 = 120 Hz display link, the game presents a frame every other display-link tick (when behind, it can present on the next 8.33 ms display-link tick)
     const char *latency = getenv("DM_PRESENT_LATENCY");
@@ -643,7 +649,11 @@ static inline void enc_r_vbuf(id<MTL4RenderCommandEncoder> e, NSUInteger i, uint
     [g_vt setAddress:gpu atIndex:i]; g_vt_addr[i] = gpu; g_vt_valid |= bit; g_vbuf_set++;
 }
 static inline void enc_r_args(id<MTL4RenderCommandEncoder> e, MTLRenderStages s, uint64_t gpu, NSUInteger i) {
-    if (s == MTLRenderStageVertex) enc_r_vbuf(e, i, gpu); else [g_ft setAddress:gpu atIndex:i];
+    if (s == MTLRenderStageVertex) { enc_r_vbuf(e, i, gpu); return; }
+    if (i >= 31) { [g_ft setAddress:gpu atIndex:i]; return; }
+    uint32_t bit = 1u << i;
+    if (g_fbuf_cache && (g_ft_valid & bit) && g_ft_addr[i] == gpu) { g_fbuf_skip++; return; }
+    [g_ft setAddress:gpu atIndex:i]; g_ft_addr[i] = gpu; g_ft_valid |= bit; g_fbuf_set++;
 }
 static inline void enc_r_draw(id<MTL4RenderCommandEncoder> e, MTLPrimitiveType p, NSUInteger v, NSUInteger n) { [e drawPrimitives:p vertexStart:v vertexCount:n]; }
 static inline void enc_r_draw_instanced(id<MTL4RenderCommandEncoder> e, MTLPrimitiveType p, NSUInteger v, NSUInteger n, NSUInteger i, NSUInteger b) { [e drawPrimitives:p vertexStart:v vertexCount:n instanceCount:i baseInstance:b]; }
@@ -1662,6 +1672,8 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct) {
 void mtl_mem_stat(unsigned long long frame, unsigned long long rss_mb) {
     if (frame % 3000 == 0) MLOG("vertex bindings frame=%llu set=%llu reused=%llu cache=%d", frame,
         (unsigned long long)g_vbuf_set, (unsigned long long)g_vbuf_skip, g_vbuf_cache);
+    if (frame % 3000 == 0) MLOG("fragment bindings frame=%llu set=%llu reused=%llu cache=%d", frame,
+        (unsigned long long)g_fbuf_set, (unsigned long long)g_fbuf_skip, g_fbuf_cache);
     static unsigned long long last_rss, last_gpu, last_frame; static int lines; unsigned long long gpu = (unsigned long long)(g_dev.currentAllocatedSize >> 20);
     unsigned long long dr = rss_mb > last_rss ? rss_mb - last_rss : last_rss - rss_mb, dg = gpu > last_gpu ? gpu - last_gpu : last_gpu - gpu;
     if (lines >= 400 || (lines && dr < 64 && dg < 64 && frame - last_frame < 3000)) return; lines++; last_rss = rss_mb; last_gpu = gpu; last_frame = frame;
