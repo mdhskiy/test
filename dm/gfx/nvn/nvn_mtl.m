@@ -7552,7 +7552,7 @@ static int exit_transition_hold(void) {
     static const uint32_t fields[] = DM_GAME_EXIT_FIELDS;
     if (enabled < 0) {
         const char *e = getenv("DM_EXIT_GUARD"), *d = getenv("DM_EXIT_TRACE");
-        enabled = e && !strcmp(e, "1"); trace = d && !strcmp(d, "1");
+        enabled = DM_GAME_EXIT_BUILD[0] && !(e && !strcmp(e, "0")); trace = d && !strcmp(d, "1");
         if (DM_GAME_EXIT_BUILD[0]) for (int i = 0; i < g_nmod; i++)
             if (!strcmp(g_mod[i].name, "main") && !strcmp(g_mod[i].build_id, DM_GAME_EXIT_BUILD) &&
                 fields[0] + sizeof(uintptr_t) <= g_mod[i].size) main = &g_mod[i];
