@@ -3,8 +3,12 @@
 The D3 v1441792 host uses actual presentation intervals and iOS thermal state
 to drive the game's existing variable-resolution viewport/upscale path. It
 does not resize the output, reallocate textures, change operation mode, or
-change shaders. A 2346x1080 output is the ceiling, not a claim that every 3D
-frame is rendered at that resolution or at the phone's native panel size.
+change shaders. The configured output is the ceiling, not a claim that every
+3D frame is rendered at that resolution or at the phone's native panel size.
+The v32 package uses 2040x940 after device testing found missing text at
+2346x1080. The latter is not an accepted quality configuration. The narrower
+configuration restores text without disabling the vertex binding cache;
+the underlying high-resolution text problem remains unresolved.
 
 The policy uses linear scale levels 1.00, 0.90, 0.80 and 0.70. Fair thermal
 state limits scale to 0.80, serious or critical to 0.70. It lowers one level if more than
@@ -43,9 +47,17 @@ compares it with zero. The gameplay gate uses nonzero type and no pending
 GameParams (`CGame+0x428 == 0`); loading artwork supplies the transition mask.
 
 The v30 device sweep confirmed scene viewport 1642x756 at 70%, quarter-size
-postprocessing 410x189, and the final UI/output pass still 2346x1080. Complete
-images at 100/90/80/70% remained aligned. Automatic policy and complete
-regression results still require the corrected gameplay gate on device.
+postprocessing 410x189, and the final UI/output pass still 2346x1080. Scene
+alignment passed, but this did not establish text correctness; v31 review
+found the same missing text in older v29 captures. Disabling vertex binding
+caching or overriding UI dimensions did not resolve it. Both 1776x816 and
+2040x940 restored text in fresh launches on the same installed v31 binary.
+
+The v31 device log confirmed menu type=0, gameplay type=1, pending=1 on quit,
+and correct re-entry. A screenshot-free forced-scale moving route had no
+presentation misses within 30 frames before to 60 frames after each of the
+100/90/80/70/100% transitions. Misses elsewhere in that route still occurred;
+this is neither a dense-combat nor a universal 60 FPS guarantee.
 
 ## Diagnostics
 
