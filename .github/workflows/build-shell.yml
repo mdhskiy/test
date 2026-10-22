@@ -92,6 +92,8 @@ jobs:
           dm/host/tests/build/t_oe
           clang -std=c11 -Wall -Wextra -Werror dm/gfx/tests/t_loading_art.c -lm -o "$RUNNER_TEMP/t_loading_art"
           "$RUNNER_TEMP/t_loading_art"
+          clang -std=c11 -Wall -Wextra -Werror dm/gfx/tests/t_exit_guard.c -o "$RUNNER_TEMP/t_exit_guard"
+          "$RUNNER_TEMP/t_exit_guard"
 
       - name: tools (xcodegen, fontTools)
 

@@ -72,6 +72,11 @@ ub_flush_fs	af93a844f4a988da
 # nothing is skipped on the strength of a query value we may have counted wrong.
 render_cond	off
 
+# Confirmed-primary-player quit: main+0x221510 calls main+0x4c65e0(400),
+# which sets AppGlobals.active+0x428 and stores the reason at +0x464.
+# Build ID, AppGlobals GOT slot, active pointer offset, pending flag, reason, quit reason.
+exit_transition	2607a74f5df7754cc0357b5df7e49693	0x114a840	0x10	0x428	0x464	400
+
 # ---- App identity ----
 app_name	DIABLO3
 

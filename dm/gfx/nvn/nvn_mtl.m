@@ -5,6 +5,7 @@
 #import <ImageIO/ImageIO.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #include <mach/mach_time.h>
+#include <mach/mach.h>
 #include <dlfcn.h>
 #include <sys/stat.h>
 #include <sys/mman.h>
@@ -23,6 +24,7 @@
 #include "nvn_refl.h"
 #include "nvn_cover.h"
 #include "nvn_loading_art.h"
+#include "nvn_exit_guard.h"
 #include "dmsh_chain.h"   // DMSH_CHAIN: the translation chain version of the B shader library expected by this source tree (in the game profile folder, -I from the Makefile)
 #include "game_profile.h"   // game profile constants (NVN driver constant segment bases, profile id)
 _Static_assert(DM_GAME_NVN_TEX_SLOTS <= 128 && DM_GAME_NVN_IMG_SLOTS <= 32 && DM_GAME_NVN_TEX_BASE + 8 * DM_GAME_NVN_TEX_SLOTS <= 0xA00 && DM_GAME_NVN_IMG_BASE + 8 * DM_GAME_NVN_IMG_SLOTS <= 0xA00 && DM_GAME_NVN_SAMP_BASE + 8 * 128 <= 0xA00, "游戏档案的 NVN 句柄表超出驱动段缓冲（0xA00）或绑定表 | the profile's NVN handle tables exceed the driver segment buffer (0xA00) or the binding tables");
@@ -5405,14 +5407,15 @@ static int ubd_conflict(NvProg *pr, const p_draw *dw, const p_draw_idx *di) {
 // The loading background is several 2D quads (center painting and side pieces).
 // Identify their sampled asset, not screen colors or texture IDs that get reused.
 // The normal viewport cache restores the original viewport on the very next draw.
+static _Atomic uint64_t g_loading_art_frame;
 static int loading_art_draw(NvProg *pr, const p_draw_idx *di, NSUInteger tw, NSUInteger th) {
     static int enabled = -1;
     if (enabled < 0) { const char *e = getenv("DM_LOADING_ART"); enabled = DM_GAME_LOADING_ART_COUNT && (!e || atoi(e) != 0); }
-    if (!enabled || !pr || !pr->sh[1] || !di || di->ind || di->prim != 4 || di->itype != 1 ||
+    if (!DM_GAME_LOADING_ART_COUNT || !pr || !pr->sh[1] || !di || di->ind || di->prim != 4 || di->itype != 1 ||
         (di->count != 6 && di->count != 12) || di->instances > 1 || S.ds.dt || S.ds.dw || S.ds.st ||
         S.nattr != 4 || S.stream[0].stride != 44 || !S.has_vp ||
         S.vp[0][0] != 0 || S.vp[0][1] != 0 || S.vp[0][2] != tw || S.vp[0][3] != th ||
-        nvn_loading_art_scale(tw, th) <= 1 || strncmp(pr->sh[1]->key, DM_GAME_LOADING_ART_FS, 16)) return 0;
+        strncmp(pr->sh[1]->key, DM_GAME_LOADING_ART_FS, 16)) return 0;
     // Do not enlarge a deliberately clipped sub-view of the same artwork.
     if (R.has_sc && (R.sc.x != 0 || R.sc.y != 0 || R.sc.w != tw || R.sc.h != th)) return 0;
     int match = 0;
@@ -5427,7 +5430,8 @@ static int loading_art_draw(NvProg *pr, const p_draw_idx *di, NSUInteger tw, NSU
         match = [obj isKindOfClass:[NvPkg class]] && ((NvPkg *)obj)->loading_art;
     }
     pthread_mutex_unlock(&g_rmu);
-    return match;
+    if (match) atomic_store(&g_loading_art_frame, atomic_load(&g_cur_frame));
+    return match && enabled && nvn_loading_art_scale(tw, th) > 1;
 }
 static void draw(const p_draw *dw, const p_draw_idx *di) {
     if (!S.prog) { RED_ONCE(18, "绘制前没有绑定程序"); PD("Z %llu 绘制跳过：没有绑定程序", g_stat_pass + !g_enc); return; }
@@ -7522,8 +7526,45 @@ uint64_t mtl_present_ext(uint64_t serial, double period, void *ev, uint64_t ev_v
     if (ev && !g_ext_ev) g_ext_ev = (__bridge id<MTLSharedEvent>)ev;
     return present_enqueue(&t, period, crop, ev ? ev_val : 0);
 }
+static int exit_read(uintptr_t address, void *out, size_t n) {
+    vm_size_t got = 0;
+    return address && vm_read_overwrite(mach_task_self(), address, n, (vm_address_t)out, &got) == KERN_SUCCESS && got == n;
+}
+static int exit_transition_hold(void) {
+    static int enabled = -1, trace; static module_t *main; static nvn_exit_guard guard;
+    static const uint32_t fields[] = DM_GAME_EXIT_FIELDS;
+    if (enabled < 0) {
+        const char *e = getenv("DM_EXIT_GUARD"), *d = getenv("DM_EXIT_TRACE");
+        enabled = e && !strcmp(e, "1"); trace = d && !strcmp(d, "1");
+        if (DM_GAME_EXIT_BUILD[0]) for (int i = 0; i < g_nmod; i++)
+            if (!strcmp(g_mod[i].name, "main") && !strcmp(g_mod[i].build_id, DM_GAME_EXIT_BUILD) &&
+                fields[0] + sizeof(uintptr_t) <= g_mod[i].size) main = &g_mod[i];
+    }
+    if ((!enabled && !trace) || !main) return 0;
+    uintptr_t app = 0, active = 0; uint32_t pending = 0, reason = 0;
+    int valid = exit_read((uintptr_t)main->base + fields[0], &app, sizeof app) &&
+        exit_read(app + fields[1], &active, sizeof active) && active &&
+        exit_read(active + fields[2], &pending, sizeof pending) &&
+        exit_read(active + fields[3], &reason, sizeof reason);
+    uint64_t frame = atomic_load(&g_cur_frame);
+    int loading = frame && atomic_load(&g_loading_art_frame) == frame;
+    int request = valid && pending == 1 && reason == fields[4];
+    int hold = nvn_exit_guard_step(&guard, request, loading, clock_gettime_nsec_np(CLOCK_UPTIME_RAW));
+    if (trace) {
+        static uintptr_t prev_active; static uint32_t prev_pending = ~0u, prev_reason = ~0u; static int prev_loading = -1;
+        if (active != prev_active || pending != prev_pending || reason != prev_reason || loading != prev_loading || hold) {
+            MLOG("exit transition frame=%llu valid=%d active=%p pending=%u reason=%u loading=%d hold=%d enabled=%d",
+                 (unsigned long long)frame, valid, (void *)active, pending, reason, loading, hold, enabled);
+            prev_active = active; prev_pending = pending; prev_reason = reason; prev_loading = loading;
+        }
+    }
+    return enabled && hold;
+}
 static uint64_t present_enqueue(const tex_t *t, double period, const int crop[4], uint64_t ev_val) {
     if (atomic_load(&g_present_discard)) return 0;   // Ticket number 0 = no pending present; the swapchain texture acquire does not wait
+    // Rendering and its completion fence still run. Only the transitional image is
+    // withheld; the drawable continues showing the last menu until loading is ready.
+    if (exit_transition_hold()) return 0;
     if (t) { xv_check(t->serial, 0, 0, "出图"); if (g_xv_npresent < 128) g_xv_present[g_xv_npresent++] = t->serial; }
     static pthread_once_t once = PTHREAD_ONCE_INIT; pthread_once(&once, present_start);
     link_sync();
