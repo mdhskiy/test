@@ -94,10 +94,18 @@ int front_ios_boot_ok(void) { return g_boot_ok; }
     self.window.rootViewController = front_ios_root();
     [self.window makeKeyAndVisible];
 }
-- (void)sceneWillResignActive:(UIScene *)s { front_ios_focus_event(0); }
+- (void)sceneWillResignActive:(UIScene *)s {
+    UIApplication.sharedApplication.idleTimerDisabled = NO;
+    front_ios_focus_event(0);
+}
 - (void)sceneDidEnterBackground:(UIScene *)s { front_ios_focus_event(1); }
 - (void)sceneWillEnterForeground:(UIScene *)s { front_ios_focus_event(2); }
-- (void)sceneDidBecomeActive:(UIScene *)s { front_ios_focus_event(3); }
+- (void)sceneDidBecomeActive:(UIScene *)s {
+    // Controller and scripted input do not reset iOS's touch idle timer. Keep an
+    // active game visible; restore normal auto-lock as soon as it loses focus.
+    UIApplication.sharedApplication.idleTimerDisabled = g_boot_ok;
+    front_ios_focus_event(3);
+}
 @end
 
 int main(int argc, char **argv) {
