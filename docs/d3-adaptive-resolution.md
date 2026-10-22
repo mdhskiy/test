@@ -32,9 +32,16 @@ The original instruction, `ldr x8, [x26, #0x10]`, still runs afterwards.
 VariableResRWindowData; the host writes only `flPercent` at `+0x18` after the
 native timing update. Full/half/quarter targets, viewport construction,
 postprocessing coordinates and final upscale remain the game's code.
-AppGlobals (GOT `0x114a840`) has active and playing CGame pointers at `+0x10`
-and `+0x18`; only the latter is a gameplay gate. Device tests must verify that
-gate, actual viewport dimensions, visual continuity and frame pacing.
+AppGlobals (GOT `0x114a840`) has its active CGame at `+0x10`. Both active and
+playing pointers also exist in menus, as the v30 device probe showed. Native
+GameIsStartUp (`0x4c7df0`) reads GameParams.type at `CGame+0x68+0x1c` and
+compares it with zero. The gameplay gate uses nonzero type and no pending
+GameParams (`CGame+0x428 == 0`); loading artwork supplies the transition mask.
+
+The v30 device sweep confirmed scene viewport 1642x756 at 70%, quarter-size
+postprocessing 410x189, and the final UI/output pass still 2346x1080. Complete
+images at 100/90/80/70% remained aligned. Automatic policy and complete
+regression results still require the corrected gameplay gate on device.
 
 ## Diagnostics
 

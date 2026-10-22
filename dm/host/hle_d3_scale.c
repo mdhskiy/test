@@ -59,10 +59,15 @@ static void d3_scale_after_update(const uint64_t *regs) {
     if (window != (uintptr_t)g_d3_main->base + 0x17de610) return;
     uint8_t *data = *(uint8_t **)(window + 0x2c0);
     if (!data) return;
-    // AppGlobals' first two CGame pointers: active (+0x10) also exists in
-    // menus; playing (+0x18) distinguishes an actual run. No save is changed.
+    // The menu also owns a "playing" CGame, so pointer presence is not an
+    // in-game test. Native GameIsStartUp at 0x4c7df0 compares GameParams.type
+    // with zero (0x4c7e24: active+0x68; 0x4c7e3c: params+0x1c).
+    // A queued GameParams at +0x428 marks an entry/exit already in progress.
     uintptr_t app = *(uintptr_t *)(g_d3_main->base + 0x114a840);
-    int playing = app && *(uintptr_t *)(app + 0x18) != 0;
+    uintptr_t game = app ? *(uintptr_t *)(app + 0x10) : 0;
+    unsigned type = game ? *(uint32_t *)(game + 0x84) : 0;
+    unsigned pending = game ? *(uint32_t *)(game + 0x428) : 1;
+    int playing = game && type != 0 && pending == 0;
     uint64_t frame = dm_nvn_frame_count();
     atomic_store(&g_d3_playing, playing); atomic_store(&g_d3_seen, frame + 1);
     if (!g_d3_on && !g_d3_fixed && !g_d3_script_n) return;
@@ -73,8 +78,8 @@ static void d3_scale_after_update(const uint64_t *regs) {
     if (native != scale) { dm_guest_write_prepare(data + 0x18, 4); *(float *)(data + 0x18) = scale; }
     static float last = -1; static int was_playing = -1; static uint64_t logged;
     if (scale != last || playing != was_playing || (g_d3_trace && frame >= logged + 300)) {
-        LOG("D3 scene scale frame=%llu playing=%d native=%.3f applied=%.3f history_us=%u window=%p",
-            (unsigned long long)frame, playing, native, scale, *(uint32_t *)(data + 0x20), (void *)window);
+        LOG("D3 scene scale frame=%llu playing=%d type=%u pending=%u native=%.3f applied=%.3f history_us=%u window=%p",
+            (unsigned long long)frame, playing, type, pending, native, scale, *(uint32_t *)(data + 0x20), (void *)window);
         last = scale; was_playing = playing; logged = frame;
     }
 }
