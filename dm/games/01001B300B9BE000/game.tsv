@@ -49,9 +49,9 @@ shader_note	Diablo III: Eternal Collection shaders (provisional profile)
 tex_flush_upload	on
 tex_dirty_upload	on
 
-# Keep every D3 transition in its original presentation. Cropping the in-run 16:9 artwork changed
-# the visible size twice around gameplay and was more distracting than the side bars, so autocrop is
-# intentionally disabled for this title.
+# Background artwork is covered at draw time using loading_art below. The complete
+# frame must never be resized by a delayed probe: that also scales the text and can
+# carry the loading crop into the first gameplay frames.
 present_autocrop	off
 
 # The soft-edge additive light shader samples the screen through a UBO that is rewritten once per light. On the
@@ -74,3 +74,14 @@ render_cond	off
 
 # ---- App identity ----
 app_name	DIABLO3
+
+# Exact XTX payload fingerprints for loading paintings and their side panels.
+# Enlarge these background draws only; keep all loading text at its authored size.
+loading_art_fs	64e3e92a4620326f
+loading_art	4194304	4921e435d81ce2257a1edad32ad7b4adbfcaf7a661396748180c43f0c4accc0e	ClientCommon.cpk/Textures\2DUI_Bnet_LoadingScreen_ActI.tex
+loading_art	4194304	73db88fd7e87e6484530662a18ee428460ef8c80ab87913624b96616147df45c	ClientCommon.cpk/Textures\2DUI_Bnet_LoadingScreen_ActII.tex
+loading_art	4194304	77f476d23b8a07bffb958b6dfd845f6e9711f39c5ea0e209cf93b64da346686a	ClientCommon.cpk/Textures\2DUI_Bnet_LoadingScreen_ActIII.tex
+loading_art	4194304	2b42f51c038a94a23fe4156bb94ef9be8d7d3bf72e61cbe5158e4fb824fec549	ClientCommon.cpk/Textures\2DUI_Bnet_LoadingScreen_ActIV.tex
+loading_art	4194304	1485e66b701b1ae3b34779af770bd21d549b99d30c9751ad604d9a301cabc568	ClientCommon.cpk/Textures\2DUI_Bnet_LoadingScreen_ActV.tex
+loading_art	4194304	f6b81693659c60836499096fdcb00a399beff7ff69513d2a8ccc4430f6a56be5	ClientCommon.cpk/Textures\2DUI_Bnet_LoadingScreen_Sides1.tex
+loading_art	4194304	307b760cff678dbdae57265200061da60ad672096e6c056cede9694f02012455	ClientCommon.cpk/Textures\2DUI_Bnet_LoadingScreen_Sides2.tex

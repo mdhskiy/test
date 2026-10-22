@@ -84,6 +84,15 @@ jobs:
 
           xcrun --sdk iphoneos --show-sdk-version
 
+      - name: display regression checks
+        run: |
+          mkdir -p "dm/host/gen/$GAME"
+          python3 dm/games/game.py header "$GAME" "dm/host/gen/$GAME/game_profile.h"
+          make -C dm/host/tests build/t_oe GAME="$GAME"
+          dm/host/tests/build/t_oe
+          clang -std=c11 -Wall -Wextra -Werror dm/gfx/tests/t_loading_art.c -lm -o "$RUNNER_TEMP/t_loading_art"
+          "$RUNNER_TEMP/t_loading_art"
+
       - name: tools (xcodegen, fontTools)
 
         run: |

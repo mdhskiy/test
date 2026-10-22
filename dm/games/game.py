@@ -103,6 +103,14 @@ def header(g):
     if any(not re.fullmatch(r'[0-9a-f]{8,16}', k) for k in ubf): sys.exit(f'{g.id}: ub_flush_fs 要写片元着色器键（8–16 位小写十六进制）| ub_flush_fs takes fragment shader keys (8-16 lowercase hex digits): {ubf}')
     pac = g.get('present_autocrop', 'off')   # present black-bar cropping: off / all / after_game (after_game arms only after a stable full-width frame, so the launch screen keeps its original layout)
     if pac not in ('off', 'all', 'after_game'): sys.exit(f'{g.id}: present_autocrop 只能是 off / all / after_game | present_autocrop must be off / all / after_game: {pac}')
+    art = g.values('loading_art')
+    for row in art:
+        if len(row) != 3 or not row[0].isdigit() or not 0 < int(row[0]) <= 64 * 1024 * 1024 or not re.fullmatch(r'[0-9a-f]{64}', row[1]):
+            sys.exit(f'{g.id}: loading_art requires byte length, SHA256 and an asset label')
+    art_fs = g.get('loading_art_fs', '')
+    if art and not re.fullmatch(r'[0-9a-f]{16}', art_fs):
+        sys.exit(f'{g.id}: loading_art_fs requires a full fragment shader key')
+    art_rows = ', '.join('{' + str(int(n)) + ', ' + q(sha) + ', ' + q(label) + '}' for n, sha, label in art)
     rcd = g.get('render_cond', 'off')   # NVN conditional rendering evaluated at replay, timestamp reports with counter 0 (nvn_mtl.m OP_RENDER_COND): on / off
     if rcd not in ('on', 'off'): sys.exit(f'{g.id}: render_cond 只能是 on / off | render_cond must be on or off: {rcd}')
     tfu = g.get('tex_flush_upload', 'off')   # textures written by the CPU into a pool and published with nvnMemoryPoolFlushMappedRange are uploaded like packaged ones (hle_nvn.c): on / off
@@ -145,6 +153,9 @@ def header(g):
          f'#define DM_GAME_ALPHA_FROM_RED {q(" ".join(afr))}',
          f'#define DM_GAME_UB_FLUSH_FS {q(" ".join(ubf))}',
          f'#define DM_GAME_PRESENT_AUTOCROP {dict(off=0, all=1, after_game=2)[pac]}',
+         f'#define DM_GAME_LOADING_ART_COUNT {len(art)}',
+         f'#define DM_GAME_LOADING_ART {{{art_rows or "{0, 0, 0}"}}}',
+         f'#define DM_GAME_LOADING_ART_FS {q(art_fs)}',
          f'#define DM_GAME_TEX_FLUSH_UPLOAD {int(tfu == "on")}',
          f'#define DM_GAME_RENDER_COND {int(rcd == "on")}',
          f'#define DM_GAME_TEX_DIRTY_UPLOAD {int(tdu == "on")}',

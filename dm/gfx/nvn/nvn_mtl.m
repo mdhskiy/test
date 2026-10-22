@@ -22,6 +22,7 @@
 #include "nvn_dirty.h"
 #include "nvn_refl.h"
 #include "nvn_cover.h"
+#include "nvn_loading_art.h"
 #include "dmsh_chain.h"   // DMSH_CHAIN: the translation chain version of the B shader library expected by this source tree (in the game profile folder, -I from the Makefile)
 #include "game_profile.h"   // game profile constants (NVN driver constant segment bases, profile id)
 _Static_assert(DM_GAME_NVN_TEX_SLOTS <= 128 && DM_GAME_NVN_IMG_SLOTS <= 32 && DM_GAME_NVN_TEX_BASE + 8 * DM_GAME_NVN_TEX_SLOTS <= 0xA00 && DM_GAME_NVN_IMG_BASE + 8 * DM_GAME_NVN_IMG_SLOTS <= 0xA00 && DM_GAME_NVN_SAMP_BASE + 8 * 128 <= 0xA00, "游戏档案的 NVN 句柄表超出驱动段缓冲（0xA00）或绑定表 | the profile's NVN handle tables exceed the driver segment buffer (0xA00) or the binding tables");
@@ -1115,10 +1116,27 @@ static void tex_put(uint64_t k, id o) {   // serials from 2^62 up are external t
 // Host record of a packaged texture: the current MTLTexture, the upload stamp, and the global write generation at the last check
 // spare: the texture the last re-upload replaced, kept resident and written by the next re-upload once the GPU has passed spare_fence (a texture the CPU rewrites every frame, a movie frame,
 // alternates between two textures instead of allocating one per frame: Link's Awakening's title movie made and freed an 8 MB texture a frame)
-@interface NvPkg : NSObject { @public id<MTLTexture> tex, spare; uint64_t stamp, seen, hash, spare_fence; const void *span; } @end   // hash: full hash of the uploaded content under DM_NVN_DIRTYCHECK; span: its tracked range (nvn_dirty_span, NULL = untracked)
+@interface NvPkg : NSObject { @public id<MTLTexture> tex, spare; uint64_t stamp, seen, hash, spare_fence; const void *span; int loading_art; } @end   // hash: full hash of the uploaded content under DM_NVN_DIRTYCHECK; span: its tracked range (nvn_dirty_span, NULL = untracked)
 @implementation NvPkg
 - (void)dealloc { res_remove(tex); if (spare) res_remove(spare); }
 @end
+// Check immutable asset identity only when uploading its bytes, never per frame.
+// A texture whose storage is reused is classified again after the new upload.
+static int loading_art_identify(const tex_t *t) {
+    static const struct { size_t size; const char *sha, *name; } art[] = DM_GAME_LOADING_ART;
+    if (!DM_GAME_LOADING_ART_COUNT || !t->mem) return 0;
+    int candidate = 0;
+    for (int i = 0; i < DM_GAME_LOADING_ART_COUNT; i++) candidate |= t->L.size == art[i].size;
+    if (!candidate) return 0;
+    unsigned char digest[CC_SHA256_DIGEST_LENGTH]; char hex[65];
+    CC_SHA256(t->mem, (CC_LONG)t->L.size, digest);
+    for (int i = 0; i < 32; i++) snprintf(hex + 2 * i, 3, "%02x", digest[i]);
+    for (int i = 0; i < DM_GAME_LOADING_ART_COUNT; i++) if (t->L.size == art[i].size && !strcmp(hex, art[i].sha)) {
+        MLOG("加载背景指纹命中：%s ser=%llu", art[i].name, (unsigned long long)t->serial);
+        return 1;
+    }
+    return 0;
+}
 static uint64_t g_pkg_uploads, g_pkg_reuploads, g_pkg_miss;
 static uint64_t g_pfv_upgrades;
 // DM_NVN_DIRTYCHECK=1 (diagnostic, compared against ground truth): fully hash the pool content on every use; changed but not detected by dirty-page tracking = a missed detection
@@ -1568,7 +1586,7 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct) {
             id<MTLTexture> reuse = nil;
             if (pk->spare) { pthread_mutex_lock(&g_mu); uint64_t done = g_done; pthread_mutex_unlock(&g_mu); if (pk->spare_fence <= done && pk->spare.usage == pk->tex.usage) reuse = pk->spare; }
             uint64_t st; id<MTLTexture> nt = pkg_upload(t, &st, reuse);
-            if (nt) { id<MTLTexture> old = pk->tex; pk->tex = nt;
+            if (nt) { id<MTLTexture> old = pk->tex; pk->tex = nt; pk->loading_art = loading_art_identify(t);
                 if (pk->spare && pk->spare != nt) defer_obj_release(pk->spare);   // still in use, or of another shape: retired as before
                 pk->spare = old; pk->spare_fence = g_fence + 1; g_ser_gen++; pk->stamp = st; pk->span = nvn_dirty_span(t->mem, t->L.size); pk->seen = nvn_dirty_now(); g_pkg_reuploads++; if (dirtycheck()) pk->hash = full_hash(t->mem, t->L.size); }
             return pk->tex;
@@ -1576,6 +1594,7 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct) {
         pk = [NvPkg new];
         pk->tex = pkg_upload(t, &pk->stamp, nil);
         if (!pk->tex) return nil;
+        pk->loading_art = loading_art_identify(t);
         pk->span = nvn_dirty_span(t->mem, t->L.size);
         pk->seen = nvn_dirty_now(); g_pkg_uploads++; if (dirtycheck()) pk->hash = full_hash(t->mem, t->L.size);
         tex_put(t->serial, pk);
@@ -5383,6 +5402,33 @@ static int ubd_conflict(NvProg *pr, const p_draw *dw, const p_draw_idx *di) {
             else if (b->kind == NVN_RB_SBUFP || b->kind == NVN_RB_UBOP) { if (ubd_hits(u->addr, u->addr + (u->size ? u->size : 1))) return 1; } } }
     return 0;
 }
+// The loading background is several 2D quads (center painting and side pieces).
+// Identify their sampled asset, not screen colors or texture IDs that get reused.
+// The normal viewport cache restores the original viewport on the very next draw.
+static int loading_art_draw(NvProg *pr, const p_draw_idx *di, NSUInteger tw, NSUInteger th) {
+    static int enabled = -1;
+    if (enabled < 0) { const char *e = getenv("DM_LOADING_ART"); enabled = DM_GAME_LOADING_ART_COUNT && (!e || atoi(e) != 0); }
+    if (!enabled || !pr || !pr->sh[1] || !di || di->ind || di->prim != 4 || di->itype != 1 ||
+        (di->count != 6 && di->count != 12) || di->instances > 1 || S.ds.dt || S.ds.dw || S.ds.st ||
+        S.nattr != 4 || S.stream[0].stride != 44 || !S.has_vp ||
+        S.vp[0][0] != 0 || S.vp[0][1] != 0 || S.vp[0][2] != tw || S.vp[0][3] != th ||
+        nvn_loading_art_scale(tw, th) <= 1 || strncmp(pr->sh[1]->key, DM_GAME_LOADING_ART_FS, 16)) return 0;
+    // Do not enlarge a deliberately clipped sub-view of the same artwork.
+    if (R.has_sc && (R.sc.x != 0 || R.sc.y != 0 || R.sc.w != tw || R.sc.h != th)) return 0;
+    int match = 0;
+    pthread_mutex_lock(&g_rmu);
+    for (int i = 0; i < pr->sh[1]->rf.nb && !match; i++) {
+        const nvn_rbind *b = &pr->sh[1]->rf.b[i];
+        if (b->kind != NVN_RB_TEX && b->kind != NVN_RB_TEXU) continue;
+        int tid = b->kind == NVN_RB_TEXU ? (int)(ubo_handle(1, b->reg, b->off) & 0xfffff) :
+                  b->reg < 128 ? (int)(S.tex[1][b->reg] & 0xfffff) : 0;
+        if (tid <= 0 || tid >= g_ntreg || !g_treg[tid].ok || !tex_fast(tid)) continue;
+        id obj = tex_get(g_treg[tid].t.serial);
+        match = [obj isKindOfClass:[NvPkg class]] && ((NvPkg *)obj)->loading_art;
+    }
+    pthread_mutex_unlock(&g_rmu);
+    return match;
+}
 static void draw(const p_draw *dw, const p_draw_idx *di) {
     if (!S.prog) { RED_ONCE(18, "绘制前没有绑定程序"); PD("Z %llu 绘制跳过：没有绑定程序", g_stat_pass + !g_enc); return; }
     __unsafe_unretained NvProg *pr = prog_get(S.prog);
@@ -5560,6 +5606,17 @@ frz_plain:;
     g_kd_force = kd_draw(pr, dw, di);
     if (pr->sh[0]) encode_args(en, pr->sh[0], 0, 1);
     if (pr->sh[1]) encode_args(en, pr->sh[1], 1, 0);
+    if (loading_art_draw(pr, di, tw, th)) {
+        double scale = nvn_loading_art_scale(tw, th);
+        MTLViewport v = g_ed.vp;
+        v.originX = (double)tw / 2 + (v.originX - (double)tw / 2) * scale;
+        v.originY = (double)th / 2 + (v.originY - (double)th / 2) * scale;
+        v.width *= scale; v.height *= scale;
+        enc_r_viewport(en, v); g_ed.vp = v;
+        static uint64_t last; uint64_t frame = atomic_load(&g_cur_frame);
+        if (!last || frame > last + 1) MLOG("加载背景等比铺满：帧 %llu，画布 %lux%lu，比例 %.6f（文字布局不变）", (unsigned long long)frame, (unsigned long)tw, (unsigned long)th, scale);
+        last = frame;
+    }
     // Parameter binding captures the actual resources under the registry lock; if the version changed between the eligibility check and the binding, split and retry before any GPU draw.
     if (g_rt_range_active && (g_pass.reg_gen != g_reg_gen || g_pass.ser_gen != g_ser_gen || g_pass.range_dirty != nvn_dirty_now())) { rp_end(); draw(dw, di); return; }
     int prim = dw ? dw->prim : di->prim;

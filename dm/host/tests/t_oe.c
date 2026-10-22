@@ -4,6 +4,7 @@
 #define HLE_OE_SOURCE "../hle_oe.c"
 #endif
 #include HLE_OE_SOURCE
+#include <assert.h>
 #include <signal.h>
 #include <sys/wait.h>
 uint64_t now_ns(void) { return 0; }
@@ -123,7 +124,30 @@ static void test_scale3d(void) {
     printf("  （实玩第二段回放：慢帧均匀散开换级 %d 次，挤在一起换级 %d 次；旧控制器真机上 12 次）\n", a, b);
     CHECK(a == 0 && b == 0, "动态比例：实玩第二段的慢帧序列（帧率 59+）不论散开还是挤在一起都不换级");
 }
+static void test_d3_display(void) {
+    uint8_t *base = calloc(1, 0x1150500), *globals = calloc(1, 0x20), *gfx = calloc(1, 0x260);
+    assert(base && globals && gfx);
+    g_nmod = 1; strcpy(g_mod[0].name, "main"); strcpy(g_mod[0].build_id, "2607a74f5df7754cc0357b5df7e49693");
+    g_mod[0].base = base; g_mod[0].size = 0x1150500;
+    *(uintptr_t *)(base + 0x114c970) = (uintptr_t)globals;
+    *(uintptr_t *)(base + 0x1150470) = (uintptr_t)(base + 0x1150460);
+    *(uintptr_t *)(base + 0x1150460) = (uintptr_t)gfx;
+    uint32_t head[] = {1776, 816, 1776, 816, 0, 1, 1776, 816};
+    memcpy(globals, head, sizeof head); *(float *)(globals + 16) = 16.0f / 9.0f;
+    uint32_t mode[] = {4, 1, 0, 0, 1600, 900, 1600, 900, 1776, 816, 60, 32, 0, 0};
+    memcpy(gfx + 0x224, mode, sizeof mode); *(float *)(gfx + 0x258) = 16.0f / 9.0f;
+    unsetenv("DM_D3_UI"); setenv("DM_D3_RES", "1776x816", 1);
+    reset(); g_ntf_perfmode = 1; dm_d3_res_tick(1776, 816);
+    CHECK(g_nres == 2 && g_res[0].nw == 2 && g_res[1].nw == 1, "D3: two pointer indirections reach DisplayMode; only named size fields are selected");
+    CHECK(*(float *)(globals + 16) == 1776.0f / 816 && *(float *)(gfx + 0x258) == 1776.0f / 816, "D3: both aspect fields use the actual render ratio");
+    CHECK(!memcmp(gfx + 0x224, mode, sizeof mode - 4), "D3: window, UI design size, flags and refresh remain unchanged");
+    CHECK(*(uint32_t *)(globals + 24) == 1776 && *(uint32_t *)(globals + 28) == 816, "D3: frame counters equal to dimensions are not treated as size fields");
+    CHECK(pop_is(31) && empty(), "D3: one mode refresh after discovery");
+    dm_d3_res_tick(1776, 816); CHECK(empty(), "D3: no repeated refresh during a transition");
+    free(base); free(globals); free(gfx); g_nmod = 0; unsetenv("DM_D3_RES");
+}
 int main(void) {
+    test_d3_display();
     test_scale3d();
     unsetenv("DM_OE_SCRIPT"); reset();
     CHECK(empty(), "初始空队列：返回false且不改输出");
