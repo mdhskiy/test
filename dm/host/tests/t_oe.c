@@ -21,6 +21,9 @@ void dm_uiscreen_res_reread(void) {}
 void dm_audio_suspend(int on) { (void)on; }   // stubs for the bg item of DM_OE_SCRIPT (hle_audio.c / hle_os.c / hle_nvn.c)
 void guest_clock_freeze_for(int reason, int on) { (void)reason; (void)on; }
 void dm_gfx_suspend(int on) { (void)on; }
+// Kernel event binding needs a guest thread; queue tests exercise the state directly.
+void hle_bind_system_event(void *ev, int autoclear) { (void)ev; (void)autoclear; }
+void hle_signal_system_event(void *ev) { (void)ev; }
 static int checks, fails;
 #define CHECK(c, s) do { checks++; int ok = !!(c); fails += !ok; printf("%s %s\n", ok ? "✓" : "✗", s); } while (0)
 static void reset(void) { g_mqh = g_mqn = 0; g_focus = 1; g_opmode = 1; g_ntf_opmode = g_ntf_perfmode = 0; }
