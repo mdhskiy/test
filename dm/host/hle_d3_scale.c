@@ -4,6 +4,7 @@
 // output crop changes or operation-mode switches occur at a scale transition.
 #include "hle.h"
 #include "dm_d3_scale_ctl.h"
+#include "dm_d3_view.h"
 #include <stdatomic.h>
 
 extern int dm_focus_now(void), dm_thermal_now(void);
@@ -13,6 +14,11 @@ extern int mtl_d3_loading_recent(void);
 static module_t *g_d3_main;
 static _Atomic int g_d3_ready, g_d3_playing, g_d3_level;
 static _Atomic uint64_t g_d3_seen;
+static _Atomic uint64_t g_d3_view;
+
+unsigned dm_d3_view_state(uint64_t frame) {
+    return d3_view_state(atomic_load(&g_d3_view), frame);
+}
 static int g_d3_on, g_d3_trace;
 static float g_d3_fixed;
 static struct { uint64_t frame; float scale; } g_d3_script[16];
@@ -69,6 +75,7 @@ static void d3_scale_after_update(const uint64_t *regs) {
     unsigned pending = game ? *(uint32_t *)(game + 0x428) : 1;
     int playing = game && type != 0 && pending == 0;
     uint64_t frame = dm_nvn_frame_count();
+    atomic_store(&g_d3_view, d3_view_snapshot(frame, game != 0, type, pending));
     atomic_store(&g_d3_playing, playing); atomic_store(&g_d3_seen, frame + 1);
     if (!g_d3_on && !g_d3_fixed && !g_d3_script_n) return;
     float native = *(float *)(data + 0x18);

@@ -19,7 +19,7 @@ static inline void d3_scale_hold(d3_scale_ctl *c, uint64_t now, uint64_t duratio
     c->ms = 0; c->n = c->drops = 0; c->nw = c->good = 0;
 }
 
-// 0=2346x1080 ceiling, 1=90%, 2=80%, 3=70% (linear dimensions).
+// 0=configured output ceiling, 1=90%, 2=80%, 3=70% (linear dimensions).
 // Fair thermal pressure caps at 80%, serious/critical at 70%; actual drops
 // can lower further before those thermal limits are reached.
 // Two-second windows: >5% drops in one window or >1% in ten seconds lowers

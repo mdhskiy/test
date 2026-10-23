@@ -30,6 +30,8 @@
 _Static_assert(DM_GAME_NVN_TEX_SLOTS <= 128 && DM_GAME_NVN_IMG_SLOTS <= 32 && DM_GAME_NVN_TEX_BASE + 8 * DM_GAME_NVN_TEX_SLOTS <= 0xA00 && DM_GAME_NVN_IMG_BASE + 8 * DM_GAME_NVN_IMG_SLOTS <= 0xA00 && DM_GAME_NVN_SAMP_BASE + 8 * 128 <= 0xA00, "游戏档案的 NVN 句柄表超出驱动段缓冲（0xA00）或绑定表 | the profile's NVN handle tables exceed the driver segment buffer (0xA00) or the binding tables");
 #include "nvn_hmap.h"
 #include "../../host/dm.h"
+#include "../../host/dm_d3_view.h"
+extern unsigned dm_d3_view_state(uint64_t frame);
 #import <CommonCrypto/CommonDigest.h>
 #include <stdarg.h>
 #include <mach-o/dyld.h>
@@ -5425,6 +5427,34 @@ static int ubd_conflict(NvProg *pr, const p_draw *dw, const p_draw_idx *di) {
 // Identify their sampled asset, not screen colors or texture IDs that get reused.
 // The normal viewport cache restores the original viewport on the very next draw.
 static _Atomic uint64_t g_loading_art_frame;
+// Only the audited final scene copy, before UI, is enlarged on the front end.
+// Runtime shader/state/target checks keep this out of gameplay and other games.
+static double d3_frontend_cover(NvProg *pr, const p_draw_idx *di, NSUInteger tw, NSUInteger th) {
+    if (!DM_GAME_D3_SCENE_FS[0] || !pr || !pr->sh[0] || !pr->sh[1] || !di ||
+        di->ind || di->prim != 5 || di->itype != 1 || di->count != 3 || di->instances != 1 ||
+        S.ds.dt || S.ds.dw || S.ds.st || S.color.blend_en || S.nattr != 3 || S.stream[0].stride != 32 ||
+        strncmp(pr->sh[0]->key, DM_GAME_D3_SCENE_VS, 16) || strncmp(pr->sh[1]->key, DM_GAME_D3_SCENE_FS, 16) ||
+        R.rt.n != 1 || !R.rt.color[0] || !xv_present(R.rt.color[0]->serial) ||
+        !S.has_vp || S.vp[0][0] != 0 || S.vp[0][1] != 0 || S.vp[0][2] != tw || S.vp[0][3] != th ||
+        (R.has_sc && (R.sc.x || R.sc.y || R.sc.w != tw || R.sc.h != th))) return 1;
+    static int enabled = -1;
+    if (enabled < 0) { const char *e = getenv("DM_D3_MENU_COVER"); enabled = !(e && !strcmp(e, "0")); }
+    if (!enabled || dm_d3_view_state(atomic_load(&g_cur_frame)) != D3_VIEW_FRONTEND) return 1;
+    return d3_view_cover(tw, th);
+}
+static double d3_game_zoom(uint64_t frame) {
+    if (!DM_GAME_D3_SCENE_FS[0] || dm_d3_view_state(frame) != D3_VIEW_GAME ||
+        atomic_load(&g_loading_art_frame) == frame) return 1;
+    static double zoom;
+    if (!zoom) {
+        zoom = 1.10;
+        const char *e = getenv("DM_D3_GAME_ZOOM");
+        if (e) { char *end; double z = strtod(e, &end);
+            if (end != e && !*end && isfinite(z) && z >= 1 && z <= 1.15) zoom = z;
+            else MLOG("Invalid DM_D3_GAME_ZOOM (expected 1.00..1.15); using 1.10"); }
+    }
+    return zoom;
+}
 // Presentation timestamps arrive eight frames late. Exclude loading and its
 // trailing samples from adaptive resolution; do not mistake loading for GPU load.
 int mtl_d3_loading_recent(void) {
@@ -5633,6 +5663,19 @@ frz_plain:;
     g_kd_force = kd_draw(pr, dw, di);
     if (pr->sh[0]) encode_args(en, pr->sh[0], 0, 1);
     if (pr->sh[1]) encode_args(en, pr->sh[1], 1, 0);
+    double menu_cover = d3_frontend_cover(pr, di, tw, th);
+    if (menu_cover > 1) {
+        MTLViewport v = g_ed.vp;
+        v.originX = d3_view_point(v.originX, tw * .5, menu_cover);
+        // Keep the hero's ground contact near the unchanged nameplate.
+        double anchor_y = th * (atomic_load_explicit(&g_origin_ll, memory_order_relaxed) ? .33 : .67);
+        v.originY = d3_view_point(v.originY, anchor_y, menu_cover);
+        v.width *= menu_cover; v.height *= menu_cover;
+        enc_r_viewport(en, v); g_ed.vp = v;
+        static uint64_t last; uint64_t frame = atomic_load(&g_cur_frame);
+        if (!last || frame > last + 1) MLOG("D3 frontend background cover frame=%llu scale=%.6f UI=unchanged", (unsigned long long)frame, menu_cover);
+        last = frame;
+    }
     if (loading_art_draw(pr, di, tw, th)) {
         double scale = nvn_loading_art_scale(tw, th);
         MTLViewport v = g_ed.vp;
@@ -6720,13 +6763,13 @@ void mtl_res_counts(uint32_t tick, const char *why) {
 #define SHOTQ_MAX 8
 static struct { uint64_t frame; char path[1024]; } g_shotq[SHOTQ_MAX]; static int g_nshotq;
 static pthread_mutex_t g_shotq_mu = PTHREAD_MUTEX_INITIALIZER;
-static int present_encode(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<MTLTexture> dst, const int crop[4]);
-static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MTLTexture> dst, const int crop[4], int uv_i);
+static int present_encode(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<MTLTexture> dst, const int crop[4], double zoom);
+static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MTLTexture> dst, const int crop[4], int uv_i, double zoom);
 // Game picture needed by the whole-window screenshot (front end window_shot; no longer does drawViewHierarchy on a Metal layer with the display link attached): at the next present, the present thread draws the same frame
 // with the same encoding as the present (present_encode) into an offscreen texture of the same size as the swapchain, and after the GPU finishes hands out a CGImage in the completion callback (the callback does not block the present). Guarded by g_shotq_mu
 static void (^g_grab_cb)(CGImageRef img);
 void mtl_grab_next_present(void (^cb)(CGImageRef img)) { pthread_mutex_lock(&g_shotq_mu); g_grab_cb = [cb copy]; pthread_mutex_unlock(&g_shotq_mu); }
-static void grab_present(id<MTLTexture> src, const int crop[4], CGSize sz) {
+static void grab_present(id<MTLTexture> src, const int crop[4], CGSize sz, double zoom) {
     pthread_mutex_lock(&g_shotq_mu); void (^cb)(CGImageRef) = g_grab_cb; g_grab_cb = nil; pthread_mutex_unlock(&g_shotq_mu);
     if (!cb) return;
     size_t w = (size_t)sz.width, h = (size_t)sz.height, row = w * 4;
@@ -6734,7 +6777,7 @@ static void grab_present(id<MTLTexture> src, const int crop[4], CGSize sz) {
     d.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead; d.storageMode = MTLStorageModePrivate;
     id<MTLTexture> out = w && h ? [g_dev newTextureWithDescriptor:d] : nil; id<MTLBuffer> buf = out ? [g_dev newBufferWithLength:row * h options:MTLResourceStorageModeShared] : nil;
     id<MTLCommandBuffer> cb2 = buf ? q_cb() : nil;
-    if (!cb2 || !present_encode(cb2, src, out, crop)) { MLOG("【红】整窗截图：游戏画面离屏编码失败（%zux%zu）", w, h); cb(NULL); return; }
+    if (!cb2 || !present_encode(cb2, src, out, crop, zoom)) { MLOG("【红】整窗截图：游戏画面离屏编码失败（%zux%zu）", w, h); cb(NULL); return; }
     id<MTLBlitCommandEncoder> b = [cb2 blitCommandEncoder];
     [b copyFromTexture:out sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(w, h, 1) toBuffer:buf destinationOffset:0 destinationBytesPerRow:row destinationBytesPerImage:row * h];
     [b endEncoding];
@@ -6752,7 +6795,7 @@ void dm_gfx_shot_at(long k, const char *path) {
     pthread_mutex_unlock(&g_shotq_mu);
 }
 // DM_NVN_SHOT_OUT=WIDTHxHEIGHT (for picture quality metrics): the present-frame screenshot instead captures the result "upscaled to this resolution by present_encode", i.e. the picture the player sees on screen; screen=0 (texture dump) is unaffected
-static void shot(id<MTLTexture> src, const char *path, int screen, const int crop[4]) {
+static void shot(id<MTLTexture> src, const char *path, int screen, const int crop[4], double zoom) {
     static int out_w = -1, out_h;
     if (out_w < 0) {
         out_w = 0;
@@ -6766,7 +6809,7 @@ static void shot(id<MTLTexture> src, const char *path, int screen, const int cro
         id<MTLTexture> out = [g_dev newTextureWithDescriptor:d];
         if (!out) { MLOG("【红】截图输出贴图建不出 %dx%d", out_w, out_h); return; }
         id<MTLCommandBuffer> cb = q_cb();
-        if (!present_encode(cb, src, out, crop)) return;
+        if (!present_encode(cb, src, out, crop, zoom)) return;
         [cb commit]; [cb waitUntilCompleted];
         read = out;
     }
@@ -6896,7 +6939,7 @@ static void td_dump(void) {
         if (e.count > 4) { snprintf(path, sizeof path, g_td_path, 0); char *dot = strrchr(path, '.'); char ext[16] = ""; if (dot) { strlcpy(ext, dot, sizeof ext); *dot = 0; }
             char tail[64]; snprintf(tail, sizeof tail, "_s%03d_%llu_%lu%s", [e[4] intValue], (unsigned long long)ser, (unsigned long)lv, ext); strlcat(path, tail, sizeof path); }   // TEXSNAP copy
         MLOG("[texdump] ser=%llu lv=%lu 层 %lu 格式 %lu %lux%lu", ser, (unsigned long)lv, (unsigned long)sl, (unsigned long)t.pixelFormat, (unsigned long)w, (unsigned long)h);
-        shot(o, path, 0, NULL);
+        shot(o, path, 0, NULL, 1);
     }
     [g_td_list removeAllObjects];
 }
@@ -7146,7 +7189,7 @@ static void auto_crop_tick(id<MTLCommandBuffer> cb, id<MTLTexture> src) {
     [be endEncoding];
     [cb addCompletedHandler:^(id<MTLCommandBuffer> c) { (void)c; auto_crop_done(src, buf, slot); }];
 }
-static int present_encode(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<MTLTexture> dst, const int crop[4]) {
+static int present_encode(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<MTLTexture> dst, const int crop[4], double zoom) {
     auto_crop_tick(cb, src);
     // 只有当游戏自己的裁切就是整幅画面、而自动检测发现两侧有黑边时，才换成内容区
     const int *use = crop;
@@ -7173,7 +7216,11 @@ static int present_encode(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<MTLTex
     if (auto_used) s = fmax(s, fmax(dw / cw, dh / ch));   // Cropping reveals the artwork's own 16:9 rectangle: cover the canvas with it instead of fitting that rectangle into new bars
     MTLViewport vp = {floor((dw - cw * s) / 2), floor((dh - ch * s) / 2), round(cw * s), round(ch * s), 0, 1};
     if (fabs((dw / dh) / ((double)cw / ch) - 1) < 0.01) vp = (MTLViewport){0, 0, dw, dh, 0, 1};
-    int full = vp.originX == 0 && vp.originY == 0 && vp.width == dw && vp.height == dh;
+    // A per-ticket scale: delayed presentation must not read a newer UI state.
+    vp.originX = d3_view_point(vp.originX, dw * .5, zoom);
+    vp.originY = d3_view_point(vp.originY, dh * .5, zoom);
+    vp.width *= zoom; vp.height *= zoom;
+    int full = vp.originX <= 0 && vp.originY <= 0 && vp.originX + vp.width >= dw && vp.originY + vp.height >= dh;
     static double last_vp[4];   // Log one line when the viewport changes (used by the real-device screen-level acceptance screen_check.py to check the aspect ratio)
     if (memcmp(last_vp, &vp, sizeof last_vp)) { memcpy(last_vp, &vp, sizeof last_vp);
         MLOG("出图视口 %.0f,%.0f %.0fx%.0f / 画布 %.0fx%.0f（游戏画面 %lux%lu）", vp.originX, vp.originY, vp.width, vp.height, dw, dh, (unsigned long)src.width, (unsigned long)src.height); }
@@ -7228,7 +7275,7 @@ static void auto_crop_tick_m4(id<MTLTexture> src) {
     [cb2 addCompletedHandler:^(id<MTLCommandBuffer> c) { (void)c; auto_crop_done(src, buf, slot); }];
     [cb2 commit];
 }
-static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MTLTexture> dst, const int crop[4], int uv_i) {
+static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MTLTexture> dst, const int crop[4], int uv_i, double zoom) {
     auto_crop_tick_m4(src);
     const int *use = crop;
     if (g_ac_have && (!crop || (crop[0] == 0 && crop[1] == 0 && (NSUInteger)crop[2] == src.width && (NSUInteger)crop[3] == src.height))) use = g_ac_crop;
@@ -7246,7 +7293,11 @@ static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MT
     if (auto_used) s = fmax(s, fmax(dw / cw, dh / ch));   // Cropping reveals the artwork's own 16:9 rectangle: cover the canvas with it instead of fitting that rectangle into new bars
     MTLViewport vp = {floor((dw - cw * s) / 2), floor((dh - ch * s) / 2), round(cw * s), round(ch * s), 0, 1};
     if (fabs((dw / dh) / ((double)cw / ch) - 1) < 0.01) vp = (MTLViewport){0, 0, dw, dh, 0, 1};
-    int full = vp.originX == 0 && vp.originY == 0 && vp.width == dw && vp.height == dh;
+    // A per-ticket scale: delayed presentation must not read a newer UI state.
+    vp.originX = d3_view_point(vp.originX, dw * .5, zoom);
+    vp.originY = d3_view_point(vp.originY, dh * .5, zoom);
+    vp.width *= zoom; vp.height *= zoom;
+    int full = vp.originX <= 0 && vp.originY <= 0 && vp.originX + vp.width >= dw && vp.originY + vp.height >= dh;
     MTL4RenderPassDescriptor *rp = [MTL4RenderPassDescriptor new];
     rp.colorAttachments[0].texture = dst;
     rp.colorAttachments[0].loadAction = full ? MTLLoadActionDontCare : MTLLoadActionClear;
@@ -7269,7 +7320,9 @@ static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MT
     return 1;
 }
 static double g_link_it_tin;   // Enqueue time of the frame the display-link callback is presenting (read and written only on the display-link thread)
-static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t ticket, const int crop[4], id<CAMetalDrawable> supplied, double target_ts) {
+static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t ticket, const int crop[4], id<CAMetalDrawable> supplied, double target_ts, double zoom) {
+    static double last_zoom;
+    if (zoom != last_zoom) { MLOG("D3 whole-frame zoom frame=%llu scale=%.3f", (unsigned long long)frame, zoom); last_zoom = zoom; }
     if (g_present_stall_ns) { struct timespec ts = {0, (long)g_present_stall_ns}; nanosleep(&ts, NULL); }
     g_present_n++;
     if (g_use != USE_OFF && g_use != USE_DONE) use_tick();
@@ -7312,9 +7365,9 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
         nshot = 0; const char *e = getenv("DM_NVN_SHOT"), *c = e ? strchr(e, ':') : NULL;
         if (c) { shot_path = c + 1; for (const char *q = e; q < c && nshot < 4096; q = strchr(q, ',') ? strchr(q, ',') + 1 : c) shots[nshot++] = atol(q); }
     }
-    for (int i = 0; i < nshot; i++) if ((long)g_present_n == shots[i]) { char path[1024]; snprintf(path, sizeof path, shot_path, (int)g_present_n); mtl_finish_gpu(); shot(src, path, 1, crop); }
+    for (int i = 0; i < nshot; i++) if ((long)g_present_n == shots[i]) { char path[1024]; snprintf(path, sizeof path, shot_path, (int)g_present_n); mtl_finish_gpu(); shot(src, path, 1, crop, zoom); }
     pthread_mutex_lock(&g_shotq_mu);
-    for (int i = 0; i < g_nshotq;) if (g_present_n >= g_shotq[i].frame) { mtl_finish_gpu(); shot(src, g_shotq[i].path, 1, crop); g_shotq[i] = g_shotq[--g_nshotq]; } else i++;
+    for (int i = 0; i < g_nshotq;) if (g_present_n >= g_shotq[i].frame) { mtl_finish_gpu(); shot(src, g_shotq[i].path, 1, crop, zoom); g_shotq[i] = g_shotq[--g_nshotq]; } else i++;
     pthread_mutex_unlock(&g_shotq_mu);
 
     CAMetalLayer *layer = (__bridge CAMetalLayer *)front_metal_layer();
@@ -7324,7 +7377,7 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
     if (!layer.displaySyncEnabled) layer.displaySyncEnabled = YES;   // Windowed mode follows the display's vsync to prevent tearing
 #endif
     present_pipeline(layer.pixelFormat);   // Same as the original path: the first frame compiles the pipeline before taking the drawable
-    if (g_grab_cb) grab_present(src, crop, layer.drawableSize);   // Game picture needed by the whole-window screenshot (peek without the lock first; the real take locks inside the function)
+    if (g_grab_cb) grab_present(src, crop, layer.drawableSize, zoom);   // Game picture needed by the whole-window screenshot (peek without the lock first; the real take locks inside the function)
     uint64_t dt0 = now_ns();
     id<CAMetalDrawable> dr = supplied ? supplied : [layer nextDrawable];
     if (!supplied) g_drawable_ns += now_ns() - dt0;
@@ -7339,7 +7392,7 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
     [g_q4 waitForDrawable:dr];
     id<MTL4CommandBuffer> cb = g_present_cb[alloc_i];
     [cb beginCommandBufferWithAllocator:g_present_alloc4[alloc_i]];
-    if (!present_encode_m4(cb, src, dr.texture, crop, alloc_i)) { [cb endCommandBuffer]; [g_q4 signalDrawable:dr]; return 0; }
+    if (!present_encode_m4(cb, src, dr.texture, crop, alloc_i, zoom)) { [cb endCommandBuffer]; [g_q4 signalDrawable:dr]; return 0; }
     [cb endCommandBuffer];
     MTL4CommitOptions *o = [MTL4CommitOptions new];
     [o addFeedbackHandler:^(id<MTL4CommitFeedback> f) {
@@ -7388,13 +7441,13 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
 // Swapchain texture return: before AcquireTexture gets a texture it waits for the ticket of that texture's previous present to be processed (mtl_present_wait), after which the commands the game draws into it
 // are necessarily ordered after that blit on the GPU queue.
 #define PQ 8
-typedef struct { tex_t t; double period; uint64_t frame; int crop[4]; double t_in; uint64_t ev_val; } pq_item;   // t_in: the time the game handed this frame into the present queue (CACurrentMediaTime); ev_val: see g_ext_ev
+typedef struct { tex_t t; double period; uint64_t frame; int crop[4]; double t_in; uint64_t ev_val; double zoom; } pq_item;   // t_in: the time the game handed this frame into the present queue (CACurrentMediaTime); ev_val: see g_ext_ev
 // External producer (the Vulkan layer, dm/gfx/vk) renders on its own queue and signals this event when a frame's rendering is done: the present of that frame waits for the value on g_q4
 static id<MTLSharedEvent> g_ext_ev;
 static void ext_wait(uint64_t v) { if (v && g_ext_ev) [g_q4 waitForEvent:g_ext_ev value:v]; }
 static pq_item g_pq[PQ];
 static uint64_t g_pq_in;
-static int present_now(const tex_t *, double, uint64_t, uint64_t, const int[4], id<CAMetalDrawable>, double);
+static int present_now(const tex_t *, double, uint64_t, uint64_t, const int[4], id<CAMetalDrawable>, double, double);
 
 @interface NvMetalDisplayLinkDelegate : NSObject <CAMetalDisplayLinkDelegate>
 @end
@@ -7435,7 +7488,7 @@ __attribute__((weak)) uint64_t dm_focus_in_since(void) { return 0; }
     pthread_mutex_unlock(&g_pq_mu);
     int submitted;
     ext_wait(it.ev_val);
-    @autoreleasepool { submitted = present_now(&it.t, it.period, it.frame, ticket, it.crop, update.drawable, update.targetPresentationTimestamp); }
+    @autoreleasepool { submitted = present_now(&it.t, it.period, it.frame, ticket, it.crop, update.drawable, update.targetPresentationTimestamp, it.zoom); }
     g_link_hold_until = submitted && it.period > 0.025 ? update.targetPresentationTimestamp + it.period : 0;
     if (!submitted) {
         pthread_mutex_lock(&g_pq_mu);
@@ -7516,7 +7569,7 @@ static void *present_main(void *arg) {
         pthread_mutex_unlock(&g_pq_mu);
         int submitted;
         ext_wait(it.ev_val);
-        @autoreleasepool { submitted = present_now(&it.t, it.period, it.frame, ticket, it.crop, nil, 0); }
+        @autoreleasepool { submitted = present_now(&it.t, it.period, it.frame, ticket, it.crop, nil, 0, it.zoom); }
         pthread_mutex_lock(&g_pq_mu); g_classic_busy = 0; pthread_cond_broadcast(&g_pq_cv); pthread_mutex_unlock(&g_pq_mu);
         if (!submitted) {
             pthread_mutex_lock(&g_pq_mu);
@@ -7599,7 +7652,7 @@ static uint64_t present_enqueue(const tex_t *t, double period, const int crop[4]
     }
     pthread_mutex_lock(&g_pq_mu);
     while (g_pq_in - g_pq_done >= PQ) pthread_cond_wait(&g_pq_cv, &g_pq_mu);   // Wait only when the queue is full; normally AcquireTexture blocks first
-    pq_item *it = &g_pq[g_pq_in % PQ]; *it = (pq_item){*t, period, atomic_load(&g_cur_frame), {0}, CACurrentMediaTime(), ev_val};
+    pq_item *it = &g_pq[g_pq_in % PQ]; *it = (pq_item){*t, period, atomic_load(&g_cur_frame), {0}, CACurrentMediaTime(), ev_val, d3_game_zoom(atomic_load(&g_cur_frame))};
     if (crop) memcpy(it->crop, crop, sizeof it->crop);   // The current frame's state is enqueued with the ticket number, rather than reading the mutable window late on the present thread
     uint64_t tk = ++g_pq_in;
     pthread_cond_broadcast(&g_pq_cv);

@@ -121,6 +121,10 @@ def header(g):
                not all(v.isdigit() for v in dr[1:]) or not 640 <= int(dr[1]) <= 4096 or not 360 <= int(dr[2]) <= 4096):
         sys.exit(f'{g.id}: d3_resolution requires build ID, width and height')
     dr_build, dr_w, dr_h = (dr[0], int(dr[1]), int(dr[2])) if dr else ('', 0, 0)
+    scene = g.words('d3_scene_blit', '')
+    if scene and (not dr_build or len(scene) != 2 or any(not re.fullmatch(r'[0-9a-f]{16}', k) for k in scene)):
+        sys.exit(f'{g.id}: d3_scene_blit requires d3_resolution and full vertex/fragment keys')
+    scene_vs, scene_fs = scene if scene else ('', '')
     if rcd not in ('on', 'off'): sys.exit(f'{g.id}: render_cond 只能是 on / off | render_cond must be on or off: {rcd}')
     tfu = g.get('tex_flush_upload', 'off')   # textures written by the CPU into a pool and published with nvnMemoryPoolFlushMappedRange are uploaded like packaged ones (hle_nvn.c): on / off
     if tfu not in ('on', 'off'): sys.exit(f'{g.id}: tex_flush_upload 只能是 on / off | tex_flush_upload must be on or off: {tfu}')
@@ -172,6 +176,8 @@ def header(g):
          f'#define DM_GAME_D3_RES_BUILD {q(dr_build)}',
          f'#define DM_GAME_D3_RES_W {dr_w}',
          f'#define DM_GAME_D3_RES_H {dr_h}',
+         f'#define DM_GAME_D3_SCENE_VS {q(scene_vs)}',
+         f'#define DM_GAME_D3_SCENE_FS {q(scene_fs)}',
          f'#define DM_GAME_TEX_DIRTY_UPLOAD {int(tdu == "on")}',
          f'#define DM_GAME_GPU_TS_SEGMENT {int(gts == "segment")}',
          f'#define DM_GAME_NVN_API_MAJOR {api.split(".")[0]}',

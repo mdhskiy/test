@@ -55,6 +55,9 @@ tex_dirty_upload	on
 # carry the loading crop into the first gameplay frames.
 present_autocrop	off
 
+# Verified pre-UI final scene blit; requires the audited D3 state hook.
+d3_scene_blit	18f2aadcec113d49	0f2802473b3f1224
+
 # The soft-edge additive light shader samples the screen through a UBO that is rewritten once per light. On the
 # deferred-uniform path its 1464-vertex draw intermittently used stale screen-transform data and copied a wrong screen
 # rectangle over the lantern. End the pass before this single draw so its uniforms land first; the rest of the frame
